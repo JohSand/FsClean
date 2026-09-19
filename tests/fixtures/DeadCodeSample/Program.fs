@@ -11,6 +11,7 @@ let main _ =
     printfn "%d" Nested.usedNested
 
     printfn "%d" (trace { return 1 })
+    printfn "%A" (List.sum [ Money.Make 1; Money.Make 2 ])
 
     match 3 with
     | Even -> printfn "even"

@@ -31,8 +31,15 @@ type Options =
 type Decl =
     { Name: string
       Kind: string
-      /// The whole declaration, including its leading keyword.
-      Range: range }
+      /// The whole declaration, including its leading keyword and attributes.
+      Range: range
+      Extent: Extent
+      /// Dead declarations that use each other share a number: a helper can't go while its dead
+      /// caller stays, and a dead cycle can only go all at once. -1 for anything not reported dead.
+      Component: int
+      /// Why removing it would leave broken code that the compiler can't be relied on to explain,
+      /// when it would.
+      Blocker: string option }
 
 type Report =
     {
@@ -193,13 +200,29 @@ let private isEffectivelyPublic (symbol: FSharpSymbol) =
             | None -> true)
     | _ -> false
 
-/// Reached through dispatch or desugaring, so it's live whenever its type is.
-let private isImplicitlyInvoked (symbol: FSharpSymbol) =
+/// The members an inline function demands of its type arguments: `List.sum` wants `get_Zero` and
+/// `op_Addition`, and the compiler solves those against the argument type without reporting a use.
+let private requiredMembers (m: FSharpMemberOrFunctionOrValue) =
+    try
+        [ for parameter in m.GenericParameters do
+              for requirement in parameter.Constraints do
+                  if requirement.IsMemberConstraint then
+                      yield requirement.MemberConstraintData.MemberName ]
+    with _ ->
+        []
+
+/// Reached through dispatch, desugaring, or a member constraint, so it's live whenever its type is.
+/// `required` is what the inline functions in use ask of their type arguments.
+let private isImplicitlyInvoked (required: HashSet<string>) (symbol: FSharpSymbol) =
     match symbol with
     | :? FSharpMemberOrFunctionOrValue as m ->
         m.IsOverrideOrExplicitInterfaceImplementation
         || m.IsDispatchSlot
         || isImplicitlyInvokedName m.LogicalName
+        || (m.IsMember
+            && (required.Contains m.LogicalName
+                || required.Contains("get_" + m.LogicalName)
+                || required.Contains("set_" + m.LogicalName)))
     | _ -> false
 
 // ---- symbols ---------------------------------------------------------------
@@ -260,7 +283,10 @@ let private describe (node: Node) : Decl =
 
     { Name = safe symbol.DisplayName (fun () -> symbol.FullName)
       Kind = if node.Symbols.Count = 0 then "extension" else kindOf symbol
-      Range = node.Extent.Range }
+      Range = node.Extent.Range
+      Extent = node.Extent
+      Component = -1
+      Blocker = None }
 
 // ---- analysis --------------------------------------------------------------
 
@@ -277,6 +303,18 @@ let private errorsIn (results: FSharpCheckProjectResults) =
     |> Array.filter (fun d -> d.Severity = FSharpDiagnosticSeverity.Error)
     |> Array.map (fun d -> $"{d.FileName}({d.StartLine},{d.StartColumn}): {d.Message}")
     |> Array.toList
+
+/// What the compiler reports for the projects as they are on disk right now.
+let typeErrors (checker: FSharpChecker) (projects: Project list) : Async<string list> =
+    async {
+        let errors = ResizeArray<string>()
+
+        for project in projects do
+            let! results = checker.ParseAndCheckProject project.Options
+            errors.AddRange(errorsIn results)
+
+        return Seq.toList errors
+    }
 
 /// One node per declaration, deduplicated by extent so a file shared between projects counts once.
 let private parseNodes (checker: FSharpChecker) (projects: Project list) =
@@ -400,13 +438,23 @@ let analyze
                     | Some original -> addEdge original node
                     | None -> addRoot node "extends a type declared outside the analyzed code"
 
+            // Every member name some inline function in use asks its type arguments for.
+            let required = HashSet<string>()
+            let inspected = HashSet<FSharpSymbol>()
+
+            for symbolUse in uses do
+                match symbolUse.Symbol with
+                | :? FSharpMemberOrFunctionOrValue as m when not symbolUse.IsFromDefinition && inspected.Add m ->
+                    required.UnionWith(requiredMembers m)
+                | _ -> ()
+
             // Members reached without a named use, and members keeping their type alive.
             for node in nodes do
                 match node.Parent with
                 | Some parent when node.Extent.Kind = Member ->
                     addEdge node parent
 
-                    if not node.Extent.IsPure || node.Symbols |> Seq.exists isImplicitlyInvoked then
+                    if not node.Extent.IsPure || node.Symbols |> Seq.exists (isImplicitlyInvoked required) then
                         addEdge parent node
                 | _ -> ()
 
@@ -431,19 +479,38 @@ let analyze
                 if node.Extent.Kind = LetBinding && not node.Extent.IsPure then
                     addRoot node impureReason
 
-            let reachable = HashSet<Node>(HashIdentity.Reference)
-            let reachedFrom = Dictionary<Node, Node option>(HashIdentity.Reference)
-            let pending = Queue<Node * Node option>(roots.Keys |> Seq.map (fun root -> root, None))
+            // What can be reached from the roots without going through `excluded`.
+            let search (excluded: HashSet<Node>) =
+                let reachable = HashSet<Node>(HashIdentity.Reference)
+                let reachedFrom = Dictionary<Node, Node option>(HashIdentity.Reference)
+                let pending = Queue<Node * Node option>(roots.Keys |> Seq.map (fun root -> root, None))
 
-            while pending.Count > 0 do
-                let node, from = pending.Dequeue()
+                while pending.Count > 0 do
+                    let node, from = pending.Dequeue()
 
-                if reachable.Add node then
-                    reachedFrom[node] <- from
+                    if not (excluded.Contains node) && reachable.Add node then
+                        reachedFrom[node] <- from
 
-                    match edges.TryGetValue node with
-                    | true, targets -> targets |> Seq.iter (fun target -> pending.Enqueue(target, Some node))
-                    | _ -> ()
+                        match edges.TryGetValue node with
+                        | true, targets -> targets |> Seq.iter (fun target -> pending.Enqueue(target, Some node))
+                        | _ -> ()
+
+                reachable, reachedFrom
+
+            let firstPass, _ = search (HashSet<Node>(HashIdentity.Reference))
+
+            // A `type X with` block is alive only because it can't be seen to be unused, but if every
+            // member in it is dead nothing is left to keep: the block goes, with them.
+            let hollow = HashSet<Node>(HashIdentity.Reference)
+
+            for node in nodes do
+                if node.Symbols.Count = 0 && firstPass.Contains node then
+                    let members = nodes |> List.filter (fun other -> other.Parent |> Option.exists (sameNode node))
+
+                    if not members.IsEmpty && members |> List.forall (fun other -> not (firstPass.Contains other)) then
+                        hollow.Add node |> ignore
+
+            let reachable, reachedFrom = search hollow
 
             // A use in dead code goes when that code does, and takes with it the need for a
             // reference that only it justified.
@@ -463,6 +530,53 @@ let analyze
             let positionOf (node: Node) =
                 node.Extent.Range.FileName, node.Extent.Range.StartLine, node.Extent.Range.StartColumn
 
+            // A dead member goes with its dead type, so it's the type that its links count for.
+            let rec top (node: Node) =
+                match node.Parent with
+                | Some parent when not (reachable.Contains parent) -> top parent
+                | _ -> node
+
+            let links = Dictionary<Node, Node>(HashIdentity.Reference)
+
+            let rec representative (node: Node) =
+                match links.TryGetValue node with
+                | true, next when not (sameNode next node) ->
+                    let root = representative next
+                    links[node] <- root
+                    root
+                | _ -> node
+
+            for KeyValue(owner, targets) in edges do
+                if not (reachable.Contains owner) then
+                    for target in targets do
+                        if not (reachable.Contains target) then
+                            links[representative (top owner)] <- representative (top target)
+
+            let componentIds = Dictionary<Node, int>(HashIdentity.Reference)
+
+            let componentOf (node: Node) =
+                let root = representative (top node)
+
+                match componentIds.TryGetValue root with
+                | true, id -> id
+                | _ ->
+                    let id = componentIds.Count
+                    componentIds[root] <- id
+                    id
+
+            // Removing the last member of a live type leaves `type T() =` with nothing after the
+            // `=`, or a dangling `with`. Which layouts do is easier to avoid than to enumerate.
+            let blockerOf (node: Node) =
+                match node.Parent with
+                | Some parent when reachable.Contains parent ->
+                    let siblings = nodes |> List.filter (fun other -> other.Parent |> Option.exists (sameNode parent))
+
+                    if siblings |> List.forall (fun sibling -> not (reachable.Contains sibling)) then
+                        Some $"it's the last member of {(describe parent).Name}, and a type can't be left with none"
+                    else
+                        None
+                | _ -> None
+
             let dead =
                 nodes
                 |> List.filter (fun node ->
@@ -471,7 +585,10 @@ let analyze
                         | Some parent -> reachable.Contains parent
                         | None -> true))
                 |> List.sortBy positionOf
-                |> List.map describe
+                |> List.map (fun node ->
+                    { describe node with
+                        Component = componentOf node
+                        Blocker = blockerOf node })
 
             let needsReview =
                 nodes

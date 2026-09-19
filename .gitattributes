@@ -1,0 +1,2 @@
+# Keeps the CRLF line endings and byte order mark the removal tests rely on.
+tests/fixtures/RemovalSample/Crlf.fs -text

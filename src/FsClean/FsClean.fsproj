@@ -17,6 +17,8 @@
     <Compile Include="ProjectLoader.fs" />
     <Compile Include="References.fs" />
     <Compile Include="Analysis.fs" />
+    <Compile Include="Removal.fs" />
+    <Compile Include="Fix.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

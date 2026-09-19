@@ -18,29 +18,44 @@ OPTIONS
                       what it uses, and what keeps it alive.
     --references      List every project reference with the uses behind it, not only the ones
                       with no compile-time use.
+    --fix             Remove the dead code from the source files. Each removal is checked: it only
+                      stays if the projects still type-check. Commit first, so it can be reviewed
+                      with git diff.
     -h, --help        Show this help.
 
 The projects must be restored first (dotnet restore)."""
 
+type private Args =
+    { Projects: string list
+      Options: Options
+      AllReferences: bool
+      Fix: bool }
+
 type private Command =
     | Help
-    | Analyze of projects: string list * Options * allReferences: bool
+    | Run of Args
     | Invalid of string
 
 let private parseArgs (argv: string list) =
-    let rec go projects options allReferences args =
-        match args with
-        | [] when List.isEmpty projects -> Invalid "no project given"
-        | [] -> Analyze(List.rev projects, options, allReferences)
+    let rec go (args: Args) rest =
+        match rest with
+        | [] when List.isEmpty args.Projects -> Invalid "no project given"
+        | [] -> Run { args with Projects = List.rev args.Projects }
         | ("-h" | "--help") :: _ -> Help
-        | "--whole-program" :: rest -> go projects { options with WholeProgram = true } allReferences rest
-        | "--explain" :: text :: rest -> go projects { options with Explain = Some text } allReferences rest
+        | "--whole-program" :: rest -> go { args with Options = { args.Options with WholeProgram = true } } rest
+        | "--explain" :: text :: rest -> go { args with Options = { args.Options with Explain = Some text } } rest
         | [ "--explain" ] -> Invalid "--explain needs a value"
-        | "--references" :: rest -> go projects options true rest
+        | "--references" :: rest -> go { args with AllReferences = true } rest
+        | "--fix" :: rest -> go { args with Fix = true } rest
         | flag :: _ when flag.StartsWith "-" -> Invalid $"unknown option {flag}"
-        | project :: rest -> go (project :: projects) options allReferences rest
+        | project :: rest -> go { args with Projects = project :: args.Projects } rest
 
-    go [] { WholeProgram = false; Explain = None } false argv
+    go
+        { Projects = []
+          Options = { WholeProgram = false; Explain = None }
+          AllReferences = false
+          Fix = false }
+        argv
 
 let private locate (decl: Decl) =
     let file = Path.GetRelativePath(Environment.CurrentDirectory, decl.Range.FileName)
@@ -98,7 +113,19 @@ let private printReferences allReferences (findings: References.Finding list) =
 
         printfn ""
 
-let private run (projectPaths: string list) options allReferences =
+let private printKept (kept: (Decl * string) list) =
+    if not kept.IsEmpty then
+        printfn "Left in place (%d)" kept.Length
+
+        for decl, reason in kept |> List.sortBy (fun (decl, _) -> decl.Range.FileName, decl.Range.StartLine) do
+            printfn "  %-40s %-12s %s" (locate decl) decl.Kind decl.Name
+            printfn "      %s" reason
+
+        printfn ""
+
+let private run (args: Args) =
+    let projectPaths = args.Projects
+
     for path in projectPaths do
         if not (File.Exists path) then
             failwithf "no such project: %s" path
@@ -106,7 +133,7 @@ let private run (projectPaths: string list) options allReferences =
     let projects = ProjectLoader.load projectPaths
     let checker = FSharpChecker.Create()
 
-    match Analysis.analyze checker options projects |> Async.RunSynchronously with
+    match Analysis.analyze checker args.Options projects |> Async.RunSynchronously with
     | Error errors ->
         eprintfn "The project doesn't type-check, so the analysis would be unreliable:"
 
@@ -115,14 +142,24 @@ let private run (projectPaths: string list) options allReferences =
 
         1
     | Ok report ->
-        printSection "Dead code" report.Dead
+        if not args.Fix then
+            printSection "Dead code" report.Dead
+
         printSection "Unused, but the initializer may have side effects (kept; review by hand)" report.NeedsReview
-        printReferences allReferences report.References
+        printReferences args.AllReferences report.References
+
+        if args.Fix then
+            let result = Fix.run projects report.Dead |> Async.RunSynchronously
+            printSection "Removed" result.Removed
+            printKept result.Kept
+            printfn "Removed %d declarations from %d files." result.Removed.Length result.Files.Length
 
         for explanation in report.Explanations do
             printfn "%s\n" explanation
 
-        printfn "%d declarations analyzed, %d dead." report.Analyzed report.Dead.Length
+        if not args.Fix then
+            printfn "%d declarations analyzed, %d dead." report.Analyzed report.Dead.Length
+
         0
 
 [<EntryPoint>]
@@ -134,4 +171,4 @@ let main argv =
     | Invalid message ->
         eprintfn "fsclean: %s\n\n%s" message usage
         2
-    | Analyze(projects, options, allReferences) -> run projects options allReferences
+    | Run args -> run args

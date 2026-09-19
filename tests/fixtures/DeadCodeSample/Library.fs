@@ -93,6 +93,20 @@ module Extensions =
         // Dead: a plain extension member nothing calls.
         member sb.UnusedShout() = sb.ToString().ToUpper()
 
+// ---- members an inline function asks for --------------------------------
+
+type Money =
+    { Amount: int }
+
+    static member Make x = { Amount = x }
+
+    // `List.sum` needs these of its element type and the compiler solves that without a named use.
+    static member Zero = { Amount = 0 }
+    static member (+)(a: Money, b: Money) = { Amount = a.Amount + b.Amount }
+
+    // Dead member of a live type.
+    static member NeverUsed() = 0
+
 // ---- initializers with effects ---------------------------------------------
 
 // Unused, but the initializer runs as part of this file's static initialization, so deleting it
