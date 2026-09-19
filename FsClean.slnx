@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FsClean/FsClean.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FsClean.Tests/FsClean.Tests.fsproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <WarningsAsErrors>FS0025</WarningsAsErrors>
+    <IsPackable>false</IsPackable>
+    <!-- FCS needs this exact FSharp.Core; see src/FsClean/FsClean.fsproj. -->
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Tests.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Expecto" Version="11.1.0" />
+    <PackageReference Include="FSharp.Core" Version="10.1.201" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\FsClean\FsClean.fsproj" />
+  </ItemGroup>
+
+</Project>

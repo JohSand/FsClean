@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <WarningsAsErrors>FS0025</WarningsAsErrors>
+    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>fsclean</ToolCommandName>
+    <PackageId>FsClean</PackageId>
+    <Description>Finds and removes dead code in F# projects.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Ast.fs" />
+    <Compile Include="ProjectLoader.fs" />
+    <Compile Include="References.fs" />
+    <Compile Include="Analysis.fs" />
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Ionide.ProjInfo.FCS" Version="0.75.0" />
+    <!-- FCS 43.12.201 requires this exact FSharp.Core; the SDK's implicit reference is newer. -->
+    <PackageReference Include="FSharp.Core" Version="10.1.201" />
+    <!-- Compile-time only: ProjectLoader evaluates the projects with the SDK's own MSBuild, which is
+         what Ionide.ProjInfo registers at runtime. Copying MSBuild next to the tool would shadow it. -->
+    <PackageReference Include="Microsoft.Build" Version="18.9.6" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+</Project>
