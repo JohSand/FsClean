@@ -9,8 +9,21 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>fsclean</ToolCommandName>
     <PackageId>FsClean</PackageId>
-    <Description>Finds and removes dead code in F# projects.</Description>
+    <Description>Finds and removes dead code, and unneeded project references, in F# projects.</Description>
+    <!-- The release workflow overrides this with the version from the tag. -->
+    <VersionPrefix>0.1.0</VersionPrefix>
+    <Authors>JohSand</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageTags>fsharp;dead-code;unused-code;refactoring;dotnet-tool</PackageTags>
+    <PackageProjectUrl>https://github.com/JohSand/FsClean</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/JohSand/FsClean</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
   <ItemGroup>
     <Compile Include="Ast.fs" />

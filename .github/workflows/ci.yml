@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The release workflow runs this too, so a tag can't publish anything that doesn't pass.
+  workflow_call:
+    inputs:
+      version:
+        description: Version to pack the tool as. A leading "v" is dropped; empty keeps the project's own.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The SDK comes from global.json, which is also what the tool itself resolves at runtime.
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        run: dotnet build --configuration Release --nologo
+
+      # The tests analyze and rewrite the small projects in tests/fixtures.
+      - name: Test
+        run: dotnet run --configuration Release --no-build --project tests/FsClean.Tests
+
+      - name: Pack
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          version="${VERSION#v}"
+          dotnet pack src/FsClean --configuration Release --output artifacts ${version:+-p:Version="$version"}
+
+      - name: Smoke test the packed tool
+        run: .github/scripts/smoke-test.sh artifacts
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: artifacts/*.nupkg
+          if-no-files-found: error
