@@ -143,6 +143,8 @@ type private WrongFinding =
       /// A live declaration reported dead, as if the analysis had made a mistake.
       Wrong: Analysis.Decl
       Result: Fix.Result
+      /// What the run said it was doing.
+      Progress: string list
       Library: string }
 
 /// Asks for the real findings plus one wrong one: usedFunction is called from main.
@@ -169,11 +171,14 @@ let private wrongFinding mode =
           Component = 9999
           Blocker = None }
 
+    let progress = ResizeArray<string>()
+
     { Directory = directory
       Projects = projects
       Report = report
       Wrong = wrong
-      Result = Fix.run mode projects (report.Dead @ [ wrong ]) |> Async.RunSynchronously
+      Result = Fix.runWith progress.Add mode projects (report.Dead @ [ wrong ]) |> Async.RunSynchronously
+      Progress = Seq.toList progress
       Library = library }
 
 [<Tests>]
@@ -219,6 +224,11 @@ let tests =
                     "Money.(+)"
                     "Extensions.GetEnumerator" ] do
                   Expect.isFalse (dead.Contains("DeadCodeSample.Library." + live)) $"{live} is alive"
+
+              // Found by reflection, by convention: ASP.NET's middleware `Invoke`, and FsCheck's
+              // static members returning `Arbitrary<_>`.
+              for live in [ "Conventions.Middleware.Invoke"; "Conventions.Generators.GenInt" ] do
+                  Expect.isFalse (dead.Contains("DeadCodeSample." + live)) $"{live} is alive"
           }
 
           test "lists an unused initializer with side effects for review, not as dead" {
@@ -352,6 +362,12 @@ let tests =
               Expect.isEmpty
                   (Analysis.typeErrors (FSharpChecker.Create()) scenario.Projects |> Async.RunSynchronously)
                   "the result type-checks"
+          }
+
+          test "sets aside the removals an error names, instead of bisecting" {
+              // The compiler says 'usedFunction' is not defined, which is the wrong finding.
+              let checks = (wrongFinding Fix.Apply).Progress |> List.filter (fun line -> line.StartsWith "checking")
+              Expect.equal checks.Length 2 "one check that fails, then one with the named removal set aside"
           }
 
           test "a preview judges removals with the compiler too, without writing anything" {

@@ -155,7 +155,14 @@ let private implicitlyInvokedMembers =
           "MoveNext"
           "get_Current"
           "op_Implicit"
-          "op_Explicit" ]
+          "op_Explicit"
+          // Frameworks that find a method by name with reflection: ASP.NET's middleware
+          // convention (`UseMiddleware<T>()` calls `Invoke` or `InvokeAsync`) and a Startup class.
+          "Invoke"
+          "InvokeAsync"
+          "Configure"
+          "ConfigureServices"
+          "ConfigureContainer" ]
 
 /// The numbered forms that `and!` desugars to: `Bind2`, `Bind3Return`, `MergeSources4`, ...
 let private andBangMember = Regex(@"^(Bind|MergeSources)\d+$|^Bind\d+Return$", RegexOptions.Compiled)
@@ -211,6 +218,15 @@ let private requiredMembers (m: FSharpMemberOrFunctionOrValue) =
     with _ ->
         []
 
+/// FsCheck registers the static members of a type it's given that return `Arbitrary<_>`, by reflection.
+let private returnsArbitrary (m: FSharpMemberOrFunctionOrValue) =
+    try
+        m.ReturnParameter.Type.HasTypeDefinition
+        && m.ReturnParameter.Type.TypeDefinition.DisplayName = "Arbitrary"
+        && m.ReturnParameter.Type.TypeDefinition.AccessPath = "FsCheck"
+    with _ ->
+        false
+
 /// Reached through dispatch, desugaring, or a member constraint, so it's live whenever its type is.
 /// `required` is what the inline functions in use ask of their type arguments.
 let private isImplicitlyInvoked (required: HashSet<string>) (symbol: FSharpSymbol) =
@@ -219,6 +235,7 @@ let private isImplicitlyInvoked (required: HashSet<string>) (symbol: FSharpSymbo
         m.IsOverrideOrExplicitInterfaceImplementation
         || m.IsDispatchSlot
         || isImplicitlyInvokedName m.LogicalName
+        || (m.IsMember && returnsArbitrary m)
         || (m.IsMember
             && (required.Contains m.LogicalName
                 || required.Contains("get_" + m.LogicalName)
@@ -303,6 +320,12 @@ let private errorsIn (results: FSharpCheckProjectResults) =
     |> Array.filter (fun d -> d.Severity = FSharpDiagnosticSeverity.Error)
     |> Array.map (fun d -> $"{d.FileName}({d.StartLine},{d.StartColumn}): {d.Message}")
     |> Array.toList
+
+/// The compiler keeps three projects in its cache unless told otherwise. A solution's projects
+/// reference each other and are checked one after another, so with fewer slots than projects it
+/// would check the same ones over and over.
+let createChecker (projects: Project list) =
+    FSharpChecker.Create(projectCacheSize = max 3 projects.Length)
 
 /// What the compiler reports for the projects as they are on disk right now.
 let typeErrors (checker: FSharpChecker) (projects: Project list) : Async<string list> =

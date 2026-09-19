@@ -30,6 +30,7 @@ type Chain =
 /// with nothing in it: once all of its declarations are removed, it goes too.
 type Container =
     {
+      Name: string
       /// The whole module, from its attributes to its last declaration.
       Range: range
       /// How many declarations its body has, of any kind, `open`s and `do`s included.
@@ -177,10 +178,11 @@ let rec private moduleDecl (container: Container option) (decl: SynModuleDecl) :
             Chain = None
             Container = container
             IsPure = true } ]
-    | SynModuleDecl.NestedModule(moduleInfo = SynComponentInfo(attributes = attributes); decls = decls; range = range) ->
+    | SynModuleDecl.NestedModule(moduleInfo = SynComponentInfo(attributes = attributes; longId = name); decls = decls; range = range) ->
         let inner =
             Some
-                { Range = withAttributes range attributes
+                { Name = (name |> List.last).idText
+                  Range = withAttributes range attributes
                   Size = decls.Length
                   Outer = container }
 

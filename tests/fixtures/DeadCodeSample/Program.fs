@@ -11,6 +11,8 @@ let main _ =
     printfn "%d" Nested.usedNested
 
     printfn "%d" (trace { return 1 })
+    Conventions.Middleware(box 1) |> ignore
+    printfn "%s" typeof<Conventions.Generators>.Name
     printfn "%A" (List.sum [ Money.Make 1; Money.Make 2 ])
 
     match 3 with

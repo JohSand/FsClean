@@ -136,7 +136,7 @@ let private run (args: Args) =
             failwithf "no such project: %s" path
 
     let projects = ProjectLoader.load projectPaths
-    let checker = FSharpChecker.Create()
+    let checker = Analysis.createChecker projects
 
     match Analysis.analyze checker args.Options projects |> Async.RunSynchronously with
     | Error errors ->
@@ -155,7 +155,8 @@ let private run (args: Args) =
 
         if args.Fix then
             let mode = if args.Dry then Fix.Preview else Fix.Apply
-            let result = Fix.run mode projects report.Dead |> Async.RunSynchronously
+            eprintfn "Checking that the removals still type-check..."
+            let result = Fix.runWith (eprintfn "%s") mode projects report.Dead |> Async.RunSynchronously
             printSection (if args.Dry then "Would remove" else "Removed") result.Removed
             printKept result.Kept
 

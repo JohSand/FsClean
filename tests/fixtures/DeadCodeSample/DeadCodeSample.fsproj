@@ -6,6 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Conventions.fs" />
     <Compile Include="Library.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
