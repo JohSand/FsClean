@@ -20,6 +20,7 @@ It needs the .NET 10 SDK. The projects you analyze must be restored first (`dotn
 ```
 fsclean MyApp.fsproj                     # report dead code
 fsclean --whole-program App.fsproj Lib.fsproj Tests.fsproj
+fsclean --dry MyApp.fsproj               # show what --fix would remove, as a diff, changing nothing
 fsclean --fix MyApp.fsproj               # remove it
 ```
 
@@ -32,6 +33,7 @@ libraries it owns.
 |---|---|
 | `--whole-program` | Treat only entry points as roots, even in libraries. |
 | `--fix` | Remove the dead code from the source files. |
+| `--dry` | Show what `--fix` would remove, with a diff, and change no file. Implies `--fix`. |
 | `--explain <text>` | Explain each declaration whose name contains the text: what uses it, what it uses, and what keeps it alive. |
 | `--references` | List every project reference with the uses behind it, not only the ones nothing compiles against. |
 
@@ -39,10 +41,11 @@ libraries it owns.
 
 `--fix` deletes whole declarations together with the comments and attributes directly above them, keeps line
 endings and byte order marks, and tidies the blank lines. **Commit first**, so you can review the result with
-`git diff`.
+`git diff`, or run with `--dry` to see the diff without changing anything.
 
-Nothing stays removed unless the projects still type-check. A batch that doesn't is split and retried, so one
-wrong finding costs that finding and not the run. What can't be removed cleanly is left in place, with the
+Nothing stays removed unless the projects still type-check, and that holds for `--dry` too: the compiler is
+shown the edited files from memory. A batch that doesn't type-check is split and retried, so one wrong finding
+costs that finding and not the run. What can't be removed cleanly is left in place, with the
 reason printed: the first declaration of a `let rec ... and` or `type ... and` chain whose later members are
 live, and the last member of a live type.
 

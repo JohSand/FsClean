@@ -105,7 +105,7 @@ let private fixFixture fixture =
         (let directory, project = copyFixture fixture
          let projects = ProjectLoader.load [ project ]
          let before = analyzeLoaded projects
-         let result = Fix.run projects before.Dead |> Async.RunSynchronously
+         let result = Fix.run Fix.Apply projects before.Dead |> Async.RunSynchronously
 
          { Directory = directory
            Before = before
@@ -135,6 +135,46 @@ let private referenceLines (report: Analysis.Report) =
         let judged = if now = after then now else $"{now} now, {after} after cleanup"
         $"{References.name finding.Project} -> {References.name finding.Reference}: {judged}")
     |> List.sort
+
+type private WrongFinding =
+    { Directory: string
+      Projects: ProjectLoader.Project list
+      Report: Analysis.Report
+      /// A live declaration reported dead, as if the analysis had made a mistake.
+      Wrong: Analysis.Decl
+      Result: Fix.Result
+      Library: string }
+
+/// Asks for the real findings plus one wrong one: usedFunction is called from main.
+let private wrongFinding mode =
+    let directory, project = copyFixture "DeadCodeSample"
+    let projects = ProjectLoader.load [ project ]
+    let report = analyzeLoaded projects
+
+    let library = Path.Combine(directory, "Library.fs")
+    let lines = File.ReadAllLines library
+    let line = 1 + Array.findIndex (fun (text: string) -> text.StartsWith "let usedFunction") lines
+    let range = Range.mkRange library (Position.mkPos line 0) (Position.mkPos line lines[line - 1].Length)
+
+    let wrong: Analysis.Decl =
+        { Name = "DeadCodeSample.Library.usedFunction"
+          Kind = "function"
+          Range = range
+          Extent =
+            { Kind = Ast.LetBinding
+              Range = range
+              Chain = None
+              Container = None
+              IsPure = true }
+          Component = 9999
+          Blocker = None }
+
+    { Directory = directory
+      Projects = projects
+      Report = report
+      Wrong = wrong
+      Result = Fix.run mode projects (report.Dead @ [ wrong ]) |> Async.RunSynchronously
+      Library = library }
 
 [<Tests>]
 let tests =
@@ -299,43 +339,60 @@ let tests =
           }
 
           test "keeps a declaration whose removal doesn't type-check, and everything else goes" {
-              let directory, project = copyFixture "DeadCodeSample"
-              let projects = ProjectLoader.load [ project ]
-              let report = analyzeLoaded projects
-
-              // A wrong finding: usedFunction is called from main.
-              let library = Path.Combine(directory, "Library.fs")
-              let lines = File.ReadAllLines library
-              let line = 1 + Array.findIndex (fun (text: string) -> text.StartsWith "let usedFunction") lines
-              let range = Range.mkRange library (Position.mkPos line 0) (Position.mkPos line lines[line - 1].Length)
-
-              let wrong: Analysis.Decl =
-                  { Name = "DeadCodeSample.Library.usedFunction"
-                    Kind = "function"
-                    Range = range
-                    Extent =
-                      { Kind = Ast.LetBinding
-                        Range = range
-                        Chain = None
-                        Container = None
-                        IsPure = true }
-                    Component = 9999
-                    Blocker = None }
-
-              let result = Fix.run projects (report.Dead @ [ wrong ]) |> Async.RunSynchronously
-
-              Expect.equal (names result.Removed) (names report.Dead) "the real findings still go"
+              let scenario = wrongFinding Fix.Apply
+              Expect.equal (names scenario.Result.Removed) (names scenario.Report.Dead) "the real findings still go"
 
               Expect.isTrue
-                  (result.Kept
-                   |> List.exists (fun (decl, why) -> decl.Name = wrong.Name && why.Contains "doesn't type-check"))
+                  (scenario.Result.Kept
+                   |> List.exists (fun (decl, why) -> decl.Name = scenario.Wrong.Name && why.Contains "doesn't type-check"))
                   "the wrong one is kept, with the compiler's reason"
 
-              Expect.isTrue ((File.ReadAllText library).Contains "let usedFunction") "and it's still in the file"
+              Expect.isTrue ((File.ReadAllText scenario.Library).Contains "let usedFunction") "and it's still in the file"
 
               Expect.isEmpty
-                  (Analysis.typeErrors (FSharpChecker.Create()) projects |> Async.RunSynchronously)
+                  (Analysis.typeErrors (FSharpChecker.Create()) scenario.Projects |> Async.RunSynchronously)
                   "the result type-checks"
+          }
+
+          test "a preview judges removals with the compiler too, without writing anything" {
+              let scenario = wrongFinding Fix.Preview
+
+              // Only possible if the compiler was shown the edited text: the wrong finding breaks main.
+              Expect.equal (names scenario.Result.Removed) (names scenario.Report.Dead) "the real findings would go"
+
+              Expect.isTrue
+                  (scenario.Result.Kept
+                   |> List.exists (fun (decl, why) -> decl.Name = scenario.Wrong.Name && why.Contains "doesn't type-check"))
+                  "and the wrong one is still refused"
+
+              for file in Directory.EnumerateFiles(scenario.Directory, "*.fs") do
+                  let original = File.ReadAllBytes(Path.Combine(repoRoot, "tests", "fixtures", "DeadCodeSample", Path.GetFileName file))
+                  Expect.equal (File.ReadAllBytes file) original $"{Path.GetFileName file} is untouched"
+
+              let _, before, after = scenario.Result.Edited |> List.find (fun (file, _, _) -> file.EndsWith "Library.fs")
+              Expect.isTrue (before.Contains "unusedFunction" && not (after.Contains "unusedFunction")) "the edit is reported"
+              Expect.isTrue (after.Contains "let usedFunction") "without the wrong finding"
+          }
+
+          test "a diff shows the deleted lines with their context" {
+              Expect.equal
+                  (Diff.unified "f.fs" "a\nb\nc\nd\ne\nf\ng\nh\n" "a\nb\nd\ne\nf\ng\nh\n")
+                  [ "--- a/f.fs"; "+++ b/f.fs"; "@@ -1,6 +1,5 @@"; " a"; " b"; "-c"; " d"; " e"; " f" ]
+                  "one hunk"
+
+              Expect.isEmpty (Diff.unified "f.fs" "a\nb\n" "a\nb\n") "nothing to show when nothing changed"
+
+              let text = [ for i in 1..20 -> string i ] |> String.concat "\n"
+              let removed = [ for i in 1..20 do if i <> 2 && i <> 18 then string i ] |> String.concat "\n"
+              let hunks = Diff.unified "f.fs" text removed |> List.filter (fun line -> line.StartsWith "@@")
+              Expect.equal hunks.Length 2 "deletions far apart get a hunk each"
+          }
+
+          test "a diff keeps Windows line endings, so it applies to such a file" {
+              Expect.equal
+                  (Diff.unified "f.fs" "a\r\nb\r\n" "a\r\n")
+                  [ "--- a/f.fs"; "+++ b/f.fs"; "@@ -1,2 +1,1 @@"; " a\r"; "-b\r" ]
+                  "carriage returns stay on the lines"
           } ]
 
 [<EntryPoint>]

@@ -21,6 +21,8 @@ OPTIONS
     --fix             Remove the dead code from the source files. Each removal is checked: it only
                       stays if the projects still type-check. Commit first, so it can be reviewed
                       with git diff.
+    --dry             Show what --fix would remove, and the diff, with the same checks, but change
+                      no file. Implies --fix.
     -h, --help        Show this help.
 
 The projects must be restored first (dotnet restore)."""
@@ -29,7 +31,8 @@ type private Args =
     { Projects: string list
       Options: Options
       AllReferences: bool
-      Fix: bool }
+      Fix: bool
+      Dry: bool }
 
 type private Command =
     | Help
@@ -47,6 +50,7 @@ let private parseArgs (argv: string list) =
         | [ "--explain" ] -> Invalid "--explain needs a value"
         | "--references" :: rest -> go { args with AllReferences = true } rest
         | "--fix" :: rest -> go { args with Fix = true } rest
+        | "--dry" :: rest -> go { args with Fix = true; Dry = true } rest
         | flag :: _ when flag.StartsWith "-" -> Invalid $"unknown option {flag}"
         | project :: rest -> go { args with Projects = project :: args.Projects } rest
 
@@ -54,7 +58,8 @@ let private parseArgs (argv: string list) =
         { Projects = []
           Options = { WholeProgram = false; Explain = None }
           AllReferences = false
-          Fix = false }
+          Fix = false
+          Dry = false }
         argv
 
 let private locate (decl: Decl) =
@@ -149,10 +154,24 @@ let private run (args: Args) =
         printReferences args.AllReferences report.References
 
         if args.Fix then
-            let result = Fix.run projects report.Dead |> Async.RunSynchronously
-            printSection "Removed" result.Removed
+            let mode = if args.Dry then Fix.Preview else Fix.Apply
+            let result = Fix.run mode projects report.Dead |> Async.RunSynchronously
+            printSection (if args.Dry then "Would remove" else "Removed") result.Removed
             printKept result.Kept
-            printfn "Removed %d declarations from %d files." result.Removed.Length result.Files.Length
+
+            if args.Dry then
+                for file, before, after in result.Edited do
+                    let path = Path.GetRelativePath(Environment.CurrentDirectory, file)
+
+                    for line in Diff.unified path before after do
+                        printfn "%s" line
+
+                printfn ""
+
+            if args.Dry then
+                printfn "Would remove %d declarations from %d files. Nothing was changed." result.Removed.Length result.Files.Length
+            else
+                printfn "Removed %d declarations from %d files." result.Removed.Length result.Files.Length
 
         for explanation in report.Explanations do
             printfn "%s\n" explanation

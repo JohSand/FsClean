@@ -1,4 +1,5 @@
-/// Applies removals to the files on disk, keeping only the ones the compiler accepts.
+/// Applies removals to the files on disk, keeping only the ones the compiler accepts. A preview
+/// does everything but write: the compiler is shown the edited files from memory.
 ///
 /// Whatever the analysis says, a removal only stays if the projects still type-check without it.
 /// A failing batch is split in half and each half tried again, so one wrong finding costs that
@@ -11,8 +12,15 @@ open System.IO
 open System.Runtime.ExceptionServices
 open System.Text
 open FSharp.Compiler.CodeAnalysis
+open FSharp.Compiler.IO
 open FsClean.Analysis
 open FsClean.ProjectLoader
+
+type Mode =
+    /// Write the removals to the files.
+    | Apply
+    /// Work out and check the removals, and change nothing.
+    | Preview
 
 type Result =
     {
@@ -20,6 +28,8 @@ type Result =
       /// Left in place, and why.
       Kept: (Decl * string) list
       Files: string list
+      /// Each changed file with its text before and after.
+      Edited: (string * string * string) list
     }
 
 let private utf8Bom = [| 0xEFuy; 0xBBuy; 0xBFuy |]
@@ -44,7 +54,20 @@ let private encode (original: byte[]) (text: string) =
     else
         body
 
-let run (projects: Project list) (dead: Decl list) : Async<Result> =
+/// Serves some files' contents from memory, so the compiler can be asked about edits that were
+/// never written.
+type private Overlay(files: IReadOnlyDictionary<string, byte[]>) =
+    inherit DefaultFileSystem()
+
+    override _.OpenFileForReadShim(filePath, ?useMemoryMappedFile, ?shouldShadowCopy) : Stream =
+        match files.TryGetValue filePath with
+        | true, bytes -> new MemoryStream(bytes) :> Stream
+        | _ -> base.OpenFileForReadShim(filePath, ?useMemoryMappedFile = useMemoryMappedFile, ?shouldShadowCopy = shouldShadowCopy)
+
+/// The compiler's file system is one setting for the whole process, so previews take turns.
+let private previewLock = obj ()
+
+let run (mode: Mode) (projects: Project list) (dead: Decl list) : Async<Result> =
     async {
         let originals =
             dead
@@ -57,12 +80,13 @@ let run (projects: Project list) (dead: Decl list) : Async<Result> =
         let unsupported, editable =
             dead |> List.partition (fun decl -> isUtf16 originals[decl.Range.FileName])
 
-        let onDisk = Dictionary<string, byte[]>()
-        originals |> Map.iter (fun file bytes -> onDisk[file] <- bytes)
+        // What each file should currently contain; in a preview, what it would.
+        let current = Dictionary<string, byte[]>()
+        originals |> Map.iter (fun file bytes -> current[file] <- bytes)
 
         let read file = decode originals[file]
 
-        /// Makes the files on disk what removing `decls` gives, and every other file what it was.
+        /// Makes the files what removing `decls` gives, and every other file what it was.
         let apply (decls: Decl list) =
             let outcome = Removal.plan read decls
 
@@ -72,16 +96,30 @@ let run (projects: Project list) (dead: Decl list) : Async<Result> =
                     | Some text -> encode original text
                     | None -> original
 
-                if wanted <> onDisk[file] then
-                    File.WriteAllBytes(file, wanted)
-                    onDisk[file] <- wanted
+                if wanted <> current[file] then
+                    if mode = Apply then
+                        File.WriteAllBytes(file, wanted)
+
+                    current[file] <- wanted
 
             outcome
 
         let check (decls: Decl list) =
             async {
                 apply decls |> ignore
-                return! typeErrors (FSharpChecker.Create()) projects
+
+                match mode with
+                | Apply -> return! typeErrors (FSharpChecker.Create()) projects
+                | Preview ->
+                    return
+                        lock previewLock (fun () ->
+                            let real = FileSystemAutoOpens.FileSystem
+                            FileSystemAutoOpens.FileSystem <- Overlay(Dictionary<string, byte[]>(current))
+
+                            try
+                                typeErrors (FSharpChecker.Create()) projects |> Async.RunSynchronously
+                            finally
+                                FileSystemAutoOpens.FileSystem <- real)
             }
 
         let rec solve (accepted: Decl list) (units: Decl list list) (rejected: (Decl list * string) list) =
@@ -122,7 +160,14 @@ let run (projects: Project list) (dead: Decl list) : Async<Result> =
                     (unsupported |> List.map (fun decl -> decl, "its file isn't UTF-8"))
                     @ outcome.Skipped
                     @ (rejected |> List.collect (fun (decls, why) -> decls |> List.map (fun decl -> decl, why)))
-                  Files = outcome.Changes |> Map.toList |> List.map fst }
+                  Files = outcome.Changes |> Map.toList |> List.map fst
+                  Edited =
+                    outcome.Changes
+                    |> Map.toList
+                    |> List.map (fun (file, text) ->
+                        // The byte order mark is part of the file's first line.
+                        let mark = if hasBom originals[file] then "\uFEFF" else ""
+                        file, mark + read file, mark + text) }
         with error ->
             // Put every file back before letting the failure through.
             apply [] |> ignore
