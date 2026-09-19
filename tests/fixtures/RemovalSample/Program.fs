@@ -1,5 +1,7 @@
 module RemovalSample.Program
 
+open RemovalSample.Vanishing
+
 [<EntryPoint>]
 let main _ =
     printfn "%d" (Layout.live1 1)

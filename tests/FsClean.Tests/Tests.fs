@@ -321,8 +321,23 @@ let tests =
               Expect.equal
                   kept
                   [ "RemovalSample.Layout.Holder.OnlyDead" // the type would be left with no members
-                    "RemovalSample.Layout.deadHead" ] // a chain can't lose its first declaration
+                    "RemovalSample.Layout.deadHead" // a chain can't lose its first declaration
+                    "RemovalSample.Vanishing.Gone.x" // its namespace would be left empty
+                    "RemovalSample.Vanishing.Gone.y" ]
                   "left in place"
+          }
+
+          test "never leaves a namespace empty, since opening it would then fail" {
+              let text = File.ReadAllText(Path.Combine(layoutFixed.Value.Directory, "Vanishing.fs"))
+              Expect.isTrue (text.Contains "module Gone" && text.Contains "let x = 1") "the dead declarations stay"
+
+              let why =
+                  layoutFixed.Value.Result.Kept
+                  |> List.filter (fun (decl, _) -> decl.Name.StartsWith "RemovalSample.Vanishing")
+                  |> List.map snd
+                  |> List.distinct
+
+              Expect.isTrue (why |> List.forall (fun reason -> reason.Contains "namespace")) "and the reason says why"
           }
 
           test "removes a module once nothing is left in it, and the module around it too" {
@@ -368,6 +383,17 @@ let tests =
               // The compiler says 'usedFunction' is not defined, which is the wrong finding.
               let checks = (wrongFinding Fix.Apply).Progress |> List.filter (fun line -> line.StartsWith "checking")
               Expect.equal checks.Length 2 "one check that fails, then one with the named removal set aside"
+          }
+
+          test "with a real build too, the removals are compiled with dotnet build and pass" {
+              let _, project = copyFixture "DeadCodeSample"
+              let projects = ProjectLoader.load [ project ]
+              let report = analyzeLoaded projects
+              let progress = ResizeArray<string>()
+              let result = Fix.runBuilt progress.Add Fix.Apply projects report.Dead |> Async.RunSynchronously
+
+              Expect.equal (names result.Removed) (names report.Dead) "everything reported dead goes"
+              Expect.isTrue (progress |> Seq.exists (fun line -> line.Trim() = "builds")) $"the build ran and passed: %A{Seq.toList progress}"
           }
 
           test "a preview judges removals with the compiler too, without writing anything" {

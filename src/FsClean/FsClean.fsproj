@@ -5,6 +5,15 @@
     <TargetFramework>net10.0</TargetFramework>
     <WarningsAsErrors>FS0025</WarningsAsErrors>
     <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
+    <!-- The tool loads the SDK's MSBuild into its own process, so it has to run on a runtime at least as
+         new as the SDK a project's global.json picks. A newer preview additionally needs
+         DOTNET_ROLL_FORWARD_TO_PRERELEASE=1 in the environment. -->
+    <RollForward>LatestMajor</RollForward>
+
+    <FSharpCoreVersion Condition="'$(FSharpCoreVersion)' == ''">10.1.201</FSharpCoreVersion>
+    <!-- For code that needs the F# 11 preview compiler, build with
+         -p:FcsVersion=43.13.101-rc1.26425.128 -p:FSharpCoreVersion=11.0.101-rc1.26425.128 -->
+    <DefineConstants Condition="'$(FcsVersion)' != ''">$(DefineConstants);FCS_11</DefineConstants>
 
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>fsclean</ToolCommandName>
@@ -38,8 +47,11 @@
 
   <ItemGroup>
     <PackageReference Include="Ionide.ProjInfo.FCS" Version="0.75.0" />
-    <!-- FCS 43.12.201 requires this exact FSharp.Core; the SDK's implicit reference is newer. -->
-    <PackageReference Include="FSharp.Core" Version="10.1.201" />
+    <!-- The compiler service must be at least as new as the F# the analyzed code was written for.
+         Ionide.ProjInfo.FCS brings 43.12.201, which needs this exact FSharp.Core. A build for newer code
+         swaps both, see FcsVersion below. -->
+    <PackageReference Include="FSharp.Core" Version="$(FSharpCoreVersion)" />
+    <PackageReference Include="FSharp.Compiler.Service" Version="$(FcsVersion)" Condition="'$(FcsVersion)' != ''" />
     <!-- Compile-time only: ProjectLoader evaluates the projects with the SDK's own MSBuild, which is
          what Ionide.ProjInfo registers at runtime. Copying MSBuild next to the tool would shadow it. -->
     <PackageReference Include="Microsoft.Build" Version="18.9.6" ExcludeAssets="runtime" />

@@ -1,8 +1,10 @@
 /// Turns `.fsproj` files into the options FSharp.Compiler.Service needs to type-check them.
 module FsClean.ProjectLoader
 
+open System
 open System.Collections.Generic
 open System.IO
+open System.Text.RegularExpressions
 open FSharp.Compiler.CodeAnalysis
 open Ionide.ProjInfo
 
@@ -63,7 +65,19 @@ let load (projectPaths: string list) : Project list =
 
     // Also returns the projects the requested ones reference, which is what lets uses in a
     // consumer keep declarations alive in the library it calls.
-    let projects = loader.LoadProjects paths |> Seq.toList
+    let projects =
+        try
+            loader.LoadProjects paths |> Seq.toList
+        with :? FileNotFoundException as error when error.Message.Contains "System.Runtime, Version=" ->
+            // MSBuild from an SDK for a newer .NET than this process runs on can't be loaded into it.
+            let needed = Regex.Match(error.Message, @"System\.Runtime, Version=(\d+)")
+            let wanted = if needed.Success then needed.Groups[1].Value else "a newer version of"
+
+            failwithf
+                "The SDK these projects pin (global.json) is for .NET %s, but fsclean is running on .NET %d. Install the .NET %s runtime and run fsclean on it, e.g. with DOTNET_ROLL_FORWARD_TO_PRERELEASE=1 set if it's a preview."
+                wanted
+                Environment.Version.Major
+                wanted
 
     if projects.IsEmpty then
         failwithf "MSBuild returned no projects for: %s" (String.concat ", " paths)

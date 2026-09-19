@@ -34,6 +34,7 @@ libraries it owns.
 | `--whole-program` | Treat only entry points as roots, even in libraries. |
 | `--fix` | Remove the dead code from the source files. |
 | `--dry` | Show what `--fix` would remove, with a diff, and change no file. Implies `--fix`. |
+| `--build` | With `--fix`, also build the projects with `dotnet build` once the removals type-check, and refuse whatever that rejects. Slower; see below. |
 | `--explain <text>` | Explain each declaration whose name contains the text: what uses it, what it uses, and what keeps it alive. |
 | `--references` | List every project reference with the uses behind it, not only the ones nothing compiles against. |
 
@@ -49,6 +50,33 @@ costs that finding and not the run. What can't be removed cleanly is left in pla
 reason printed: the first declaration of a `let rec ... and` or `type ... and` chain whose later members are
 live, and the last member of a live type.
 
+### Checking the result
+
+The quick check uses the F# compiler service, which is not the compiler: on a large solution it accepted
+a removal (a namespace left with nothing in it, and one more case that wasn't tracked down) that `dotnet build`
+then rejected. Use `--build` on anything you can't afford to get wrong: after the removals type-check, the
+projects are built for real, and removals that the errors name, or that edited a file with an error, are
+set aside. A namespace is never left empty, since the compiler treats one as not defined.
+
+### Big solutions
+
+It holds a type-checked copy of the whole solution, so expect several gigabytes for a few hundred thousand
+lines (about 6 GB for 400k). A run prints what it's doing on stderr, because a check of a large solution takes
+minutes.
+
+### Newer F# than the tool
+
+The analysis is only as good as the compiler service it's built with, which is F# 10. Code that needs a newer
+language version doesn't type-check, and the tool says so instead of guessing. If `dotnet build` accepts the
+projects but fsclean doesn't, that's why. To build one for the F# 11 preview:
+
+```
+dotnet build src/FsClean -c Release -p:FcsVersion=43.13.101-rc1.26425.128 -p:FSharpCoreVersion=11.0.101-rc1.26425.128
+```
+
+A project whose `global.json` pins a newer SDK than the runtime fsclean is on also needs that runtime; set
+`DOTNET_ROLL_FORWARD_TO_PRERELEASE=1` if it's a preview.
+
 ### Project references
 
 Each `<ProjectReference>` is judged by whether the referencing project uses anything declared in the referenced
@@ -61,6 +89,11 @@ Everything here is compile-time evidence. Code that is only reached through refl
 serialization or generated code looks dead, and a project reference that is only needed at runtime (a plugin
 loaded by reflection, a reference that copies output) looks unneeded. Review what it reports. Initializers that
 might have side effects are listed for review and never removed.
+
+Conventions where a framework calls a method by name are known for ASP.NET middleware (`Invoke`,
+`InvokeAsync`) and FsCheck generators; others (for instance a serializer that finds members by reflection)
+are not, so a compile-time-clean result still deserves a look.
+
 
 ## Development
 

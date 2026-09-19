@@ -2,6 +2,10 @@
 /// does everything but write: the compiler is shown the edited files from memory.
 ///
 /// Whatever the analysis says, a removal only stays if the projects still type-check without it.
+/// The compiler service is the quick check, and it is not the compiler: it accepts some code the
+/// compiler rejects. With `realBuild`, once the removals type-check, the projects are built with
+/// `dotnet build` and whatever that rejects is set aside too.
+///
 /// When a batch fails, the compiler's errors usually name what is missing, and the removals with
 /// those names are set aside at once; when they don't, the batch is split in half and each half
 /// tried again. Either way one wrong finding costs that finding rather than the whole run. Dead declarations that use each other are never split apart:
@@ -10,6 +14,7 @@ module FsClean.Fix
 
 open System
 open System.Collections.Generic
+open System.Diagnostics
 open System.IO
 open System.Runtime.ExceptionServices
 open System.Text
@@ -77,6 +82,38 @@ let private quoted = Regex("'([^']+)'", RegexOptions.Compiled)
 let private mentionedIn (error: string) =
     [ for m in quoted.Matches error -> m.Groups[1].Value ]
 
+let private buildError = Regex(@"^\s*(.+?)\((\d+),(\d+)\): error (\S+): (.*?)(?: \[[^\]]+\])?\s*$", RegexOptions.Compiled)
+
+/// What `dotnet build` reports for these projects as they are on disk, as `file(line,col): message`
+/// with absolute paths.
+let private buildErrors (projectFiles: string list) : Async<string list> =
+    async {
+        let errors = ResizeArray<string>()
+
+        for file in projectFiles do
+            let directory = Path.GetDirectoryName file
+            let info = ProcessStartInfo("dotnet", $"build \"{file}\" --nologo -v q")
+            info.WorkingDirectory <- directory
+            info.RedirectStandardOutput <- true
+            info.RedirectStandardError <- true
+            use build = Process.Start info
+            let! output = build.StandardOutput.ReadToEndAsync() |> Async.AwaitTask
+            let! error = build.StandardError.ReadToEndAsync() |> Async.AwaitTask
+            build.WaitForExit()
+
+            for line in (output + "\n" + error).Split '\n' do
+                let m = buildError.Match line
+
+                if m.Success then
+                    let path = Path.GetFullPath(m.Groups[1].Value.Replace('\\', '/'), directory)
+                    let text = $"{path}({m.Groups[2].Value},{m.Groups[3].Value}): {m.Groups[5].Value}"
+
+                    if not (errors.Contains text) then
+                        errors.Add text
+
+        return Seq.toList errors
+    }
+
 /// What an error can call a declaration: its own name, the type around it, and the modules around
 /// that. Removing something can leave its module or type empty and gone, and the compiler then
 /// complains about the module or type, not the member.
@@ -93,9 +130,13 @@ let private namesOf (decl: Decl) =
           yield segments[segments.Length - 2]
       yield! modules decl.Extent.Container ]
 
-/// Like `run`, telling `progress` what it's doing: a check of a large solution takes a while, and
-/// there are usually several.
-let runWith (progress: string -> unit) (mode: Mode) (projects: Project list) (dead: Decl list) : Async<Result> =
+let private runCore
+    (realBuild: bool)
+    (progress: string -> unit)
+    (mode: Mode)
+    (projects: Project list)
+    (dead: Decl list)
+    : Async<Result> =
     async {
         let originals =
             dead
@@ -211,6 +252,55 @@ let runWith (progress: string -> unit) (mode: Mode) (projects: Project list) (de
                 |> List.map snd
 
             let! accepted, rejected = solve [] units []
+
+            // The compiler service accepts what the compiler doesn't, now and then, so build for real.
+            let rec confirm (accepted: Decl list) (rejected: (Decl list * string) list) =
+                async {
+                    if not realBuild || mode = Preview || List.isEmpty accepted then
+                        return accepted, rejected
+                    else
+                        apply accepted |> ignore
+                        progress "building the projects with dotnet build..."
+
+                        let! errors = buildErrors (projects |> List.map (fun project -> project.File) |> List.distinct)
+
+                        if List.isEmpty errors then
+                            progress "  builds"
+                            return accepted, rejected
+                        else
+                            progress $"  {errors.Length} errors"
+
+                            let units = accepted |> List.groupBy (fun decl -> decl.Component) |> List.map snd
+
+                            // An error names what's missing, or is in a file a removal edited.
+                            let culprits =
+                                units
+                                |> List.choose (fun unit ->
+                                    let names = unit |> List.collect namesOf |> Set.ofList
+                                    let files = unit |> List.map (fun decl -> decl.Range.FileName) |> Set.ofList
+
+                                    errors
+                                    |> List.tryFind (fun error ->
+                                        mentionedIn error |> List.exists names.Contains
+                                        || files |> Set.exists (fun file -> error.StartsWith(file + "(")))
+                                    |> Option.map (fun error -> unit, error))
+
+                            if culprits.IsEmpty then
+                                let why = $"the build fails and the errors don't say which removal: {List.head errors}"
+                                return [], (accepted, why) :: rejected
+                            else
+                                progress $"  setting aside the {culprits.Length} removals the errors name or sit in"
+                                let named = culprits |> List.map fst
+                                let rest = units |> List.filter (fun unit -> not (List.contains unit named))
+
+                                let more =
+                                    culprits |> List.map (fun (unit, error) -> unit, $"the build rejects removing it: {error}")
+
+                                return! confirm (List.concat rest) (more @ rejected)
+                }
+
+            let! accepted, rejected = confirm accepted rejected
+
             // Leave the files as the accepted set alone makes them, whatever was tried last.
             let outcome = apply accepted
 
@@ -234,6 +324,16 @@ let runWith (progress: string -> unit) (mode: Mode) (projects: Project list) (de
             ExceptionDispatchInfo.Capture(error).Throw()
             return Unchecked.defaultof<Result>
     }
+
+
+/// Like `run`, telling `progress` what it's doing.
+let runWith (progress: string -> unit) (mode: Mode) (projects: Project list) (dead: Decl list) : Async<Result> =
+    runCore false progress mode projects dead
+
+/// Like `runWith`, and once the removals type-check also builds the projects for real with
+/// `dotnet build`, setting aside whatever that rejects. Ignored for a preview, which writes nothing.
+let runBuilt (progress: string -> unit) (mode: Mode) (projects: Project list) (dead: Decl list) : Async<Result> =
+    runCore true progress mode projects dead
 
 let run (mode: Mode) (projects: Project list) (dead: Decl list) : Async<Result> =
     runWith ignore mode projects dead

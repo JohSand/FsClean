@@ -26,14 +26,18 @@ type Chain =
       Index: int
     }
 
-/// A nested `module X = ...`. It isn't something the analysis judges, but it can't be left behind
-/// with nothing in it: once all of its declarations are removed, it goes too.
+/// A nested `module X = ...`, or a `namespace X` fragment. Neither is something the analysis judges,
+/// but neither can be left with nothing in it. A module whose declarations are all removed goes
+/// too. A namespace can't go, since `open` of it elsewhere would break, and the compiler treats an
+/// empty one as not defined, which the compiler service doesn't: so its declarations stay.
 type Container =
     {
       Name: string
+      IsNamespace: bool
       /// The whole module, from its attributes to its last declaration.
       Range: range
-      /// How many declarations its body has, of any kind, `open`s and `do`s included.
+      /// How many declarations its body has, not counting `open`s: a body of only those is as good
+      /// as empty.
       Size: int
       /// The module around it, when it is nested too.
       Outer: Container option
@@ -134,6 +138,13 @@ let rec private memberDefn (defn: SynMemberDefn) : Extent list =
     | SynMemberDefn.Interface(members = Some members) -> List.collect memberDefn members
     | _ -> []
 
+/// A nested module's attributes and name. The F# 11 compiler service changed SynComponentInfo's fields.
+#if FCS_11
+let private componentInfo (SynComponentInfo(attributes = attributes) as info) = attributes, info.LongIdent
+#else
+let private componentInfo (SynComponentInfo(attributes = attributes; longId = name)) = attributes, name
+#endif
+
 let private typeAttributes (SynTypeDefn(typeInfo = SynComponentInfo(attributes = attributes))) = attributes
 
 let private typeExtent (range: range) container (defn: SynTypeDefn) =
@@ -150,6 +161,16 @@ let private typeMembers (SynTypeDefn(typeRepr = repr; members = members)) =
         | _ -> []
 
     List.collect memberDefn (reprMembers @ members)
+
+/// Declarations that make a module or namespace worth keeping: not `open`s and directives.
+let private substantial (decls: SynModuleDecl list) =
+    decls
+    |> List.filter (fun decl ->
+        match decl with
+        | SynModuleDecl.Open _
+        | SynModuleDecl.HashDirective _ -> false
+        | _ -> true)
+    |> List.length
 
 let rec private moduleDecl (container: Container option) (decl: SynModuleDecl) : Extent list =
     match decl with
@@ -178,12 +199,15 @@ let rec private moduleDecl (container: Container option) (decl: SynModuleDecl) :
             Chain = None
             Container = container
             IsPure = true } ]
-    | SynModuleDecl.NestedModule(moduleInfo = SynComponentInfo(attributes = attributes; longId = name); decls = decls; range = range) ->
+    | SynModuleDecl.NestedModule(moduleInfo = info; decls = decls; range = range) ->
+        let attributes, name = componentInfo info
+
         let inner =
             Some
                 { Name = (name |> List.last).idText
+                  IsNamespace = false
                   Range = withAttributes range attributes
-                  Size = decls.Length
+                  Size = substantial decls
                   Outer = container }
 
         List.collect (moduleDecl inner) decls
@@ -194,5 +218,19 @@ let rec private moduleDecl (container: Container option) (decl: SynModuleDecl) :
 let extents (input: ParsedInput) : Extent list =
     match input with
     | ParsedInput.ImplFile(ParsedImplFileInput(contents = modules)) ->
-        modules |> List.collect (fun (SynModuleOrNamespace(decls = decls)) -> List.collect (moduleDecl None) decls)
+        modules
+        |> List.collect (fun (SynModuleOrNamespace(longId = name; kind = kind; decls = decls; range = range)) ->
+            let container =
+                match kind with
+                | SynModuleOrNamespaceKind.DeclaredNamespace
+                | SynModuleOrNamespaceKind.GlobalNamespace ->
+                    Some
+                        { Name = name |> List.map (fun id -> id.idText) |> String.concat "."
+                          IsNamespace = true
+                          Range = range
+                          Size = substantial decls
+                          Outer = None }
+                | _ -> None
+
+            List.collect (moduleDecl container) decls)
     | ParsedInput.SigFile _ -> []

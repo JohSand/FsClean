@@ -21,6 +21,9 @@ OPTIONS
     --fix             Remove the dead code from the source files. Each removal is checked: it only
                       stays if the projects still type-check. Commit first, so it can be reviewed
                       with git diff.
+    --build           With --fix, also build the projects with dotnet build once the removals type-check,
+                      and refuse whatever it rejects. Slower, and catches what the F# compiler service
+                      used for the type-check accepts and the compiler does not.
     --dry             Show what --fix would remove, and the diff, with the same checks, but change
                       no file. Implies --fix.
     -h, --help        Show this help.
@@ -32,7 +35,8 @@ type private Args =
       Options: Options
       AllReferences: bool
       Fix: bool
-      Dry: bool }
+      Dry: bool
+      Build: bool }
 
 type private Command =
     | Help
@@ -51,6 +55,7 @@ let private parseArgs (argv: string list) =
         | "--references" :: rest -> go { args with AllReferences = true } rest
         | "--fix" :: rest -> go { args with Fix = true } rest
         | "--dry" :: rest -> go { args with Fix = true; Dry = true } rest
+        | "--build" :: rest -> go { args with Build = true } rest
         | flag :: _ when flag.StartsWith "-" -> Invalid $"unknown option {flag}"
         | project :: rest -> go { args with Projects = project :: args.Projects } rest
 
@@ -59,7 +64,8 @@ let private parseArgs (argv: string list) =
           Options = { WholeProgram = false; Explain = None }
           AllReferences = false
           Fix = false
-          Dry = false }
+          Dry = false
+          Build = false }
         argv
 
 let private locate (decl: Decl) =
@@ -136,15 +142,27 @@ let private run (args: Args) =
             failwithf "no such project: %s" path
 
     let projects = ProjectLoader.load projectPaths
+    let names =
+        projects |> List.map (fun project -> References.name project.File) |> List.distinct |> List.sort
+
+    eprintfn "Analyzing %d projects: %s" names.Length (String.concat ", " names)
     let checker = Analysis.createChecker projects
 
     match Analysis.analyze checker args.Options projects |> Async.RunSynchronously with
     | Error errors ->
-        eprintfn "The project doesn't type-check, so the analysis would be unreliable:"
+        let shown = 20
+        eprintfn "The projects don't type-check, so the analysis would be unreliable (%d errors):" errors.Length
 
-        for error in errors do
+        for error in List.truncate shown errors do
             eprintfn "  %s" error
 
+        if errors.Length > shown then
+            eprintfn "  ... and %d more" (errors.Length - shown)
+
+        let compiler = typeof<FSharpChecker>.Assembly.GetName().Version
+        eprintfn ""
+        eprintfn "If `dotnet build` accepts these projects, they may use newer F# language features than the"
+        eprintfn "compiler service this fsclean was built with (FSharp.Compiler.Service %O)." compiler
         1
     | Ok report ->
         if not args.Fix then
@@ -156,7 +174,8 @@ let private run (args: Args) =
         if args.Fix then
             let mode = if args.Dry then Fix.Preview else Fix.Apply
             eprintfn "Checking that the removals still type-check..."
-            let result = Fix.runWith (eprintfn "%s") mode projects report.Dead |> Async.RunSynchronously
+            let run = if args.Build then Fix.runBuilt else Fix.runWith
+            let result = run (eprintfn "%s") mode projects report.Dead |> Async.RunSynchronously
             printSection (if args.Dry then "Would remove" else "Removed") result.Removed
             printKept result.Kept
 
@@ -191,4 +210,9 @@ let main argv =
     | Invalid message ->
         eprintfn "fsclean: %s\n\n%s" message usage
         2
-    | Run args -> run args
+    | Run args ->
+        try
+            run args
+        with Failure message ->
+            eprintfn "fsclean: %s" message
+            1

@@ -86,13 +86,15 @@ let private deletions (dead: Decl list) : Deletion list * (Decl * string) list =
     single @ wholeUnits @ partialDeletions, skipped
 
 /// A module can't be left with an empty body. When every declaration in one is being deleted, the
-/// module goes too, and then the same goes for the module around it.
+/// module goes too, and then the same goes for the module around it. A namespace can't go, so the
+/// deletions that would empty one are called off.
 let rec private withEmptiedModules (deletions: Deletion list) : Deletion list =
     let key (container: Container) = rangeKey container.Range
 
     let emptied =
         deletions
         |> List.choose (fun deletion -> deletion.Container)
+        |> List.filter (fun container -> not container.IsNamespace)
         |> List.groupBy key
         |> List.filter (fun (_, group) -> group.Length = group.Head.Size)
         |> List.map (fun (_, group) -> group.Head)
@@ -207,6 +209,30 @@ let plan (read: string -> string) (dead: Decl list) : Outcome =
     let deletions, chainSkips = deletions removable
     let deletions = withEmptiedModules deletions
 
+    // The namespaces every declaration of which is going. Nothing in them may.
+    let namespaces =
+        deletions
+        |> List.choose (fun deletion -> deletion.Container)
+        |> List.filter (fun container -> container.IsNamespace)
+        |> List.groupBy (fun container -> rangeKey container.Range)
+        |> List.filter (fun (_, group) -> group.Length = group.Head.Size)
+        |> List.map (fun (_, group) -> group.Head)
+
+    let inEmptied (range: range) =
+        namespaces |> List.exists (fun container -> Range.rangeContainsRange container.Range range)
+
+    let deletions, namespaceSkips =
+        let kept, refused = deletions |> List.partition (fun deletion -> not (inEmptied deletion.Range))
+
+        let skipped =
+            refused
+            |> List.collect (fun deletion ->
+                deletion.Decls
+                |> List.map (fun decl ->
+                    decl, "it would leave its namespace with no declarations, which the compiler treats as not defined, so `open` of it would fail"))
+
+        kept, skipped
+
     let mutable changes = Map.empty
     let mutable removed = []
     let mutable skipped = []
@@ -224,4 +250,4 @@ let plan (read: string -> string) (dead: Decl list) : Outcome =
 
     { Changes = changes
       Removed = removed
-      Skipped = (blocked |> List.map (fun decl -> decl, decl.Blocker.Value)) @ chainSkips @ skipped }
+      Skipped = (blocked |> List.map (fun decl -> decl, decl.Blocker.Value)) @ chainSkips @ namespaceSkips @ skipped }

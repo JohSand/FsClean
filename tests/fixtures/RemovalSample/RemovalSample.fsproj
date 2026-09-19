@@ -6,6 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="Vanishing.fs" />
     <Compile Include="Layout.fs" />
     <Compile Include="Crlf.fs" />
     <Compile Include="Program.fs" />
