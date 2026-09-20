@@ -19,12 +19,14 @@ It needs the .NET 10 SDK. The projects you analyze must be restored first (`dotn
 
 ```
 fsclean MyApp.fsproj                     # report dead code
+fsclean --whole-program MyApp.slnx       # every F# project in a solution
 fsclean --whole-program App.fsproj Lib.fsproj Tests.fsproj
 fsclean --dry MyApp.fsproj               # show what --fix would remove, as a diff, changing nothing
 fsclean --fix MyApp.fsproj               # remove it
 ```
 
-Give it every project that consumes the code you care about. Without `--whole-program`, the public API of a
+A `.sln`, `.slnx` or `.slnf` stands for the F# projects it lists; projects in other languages are skipped. Give it
+every project that consumes the code you care about. Without `--whole-program`, the public API of a
 library counts as used, since something outside the analysis may call it. With it, only entry points and
 attributed declarations (tests, for instance) are roots, which is what you want for an application and the
 libraries it owns.
@@ -32,6 +34,7 @@ libraries it owns.
 | Option | |
 |---|---|
 | `--whole-program` | Treat only entry points as roots, even in libraries. |
+| `--exclude <text>` | Leave out the projects whose path contains the text (repeatable), for a project in a solution that doesn't build. One that isn't left out and references it still brings it in. |
 | `--fix` | Remove the dead code from the source files. |
 | `--dry` | Show what `--fix` would remove, with a diff, and change no file. Implies `--fix`. |
 | `--build` | With `--fix`, also build the projects with `dotnet build` once the removals type-check, and refuse whatever that rejects. Slower; see below. |

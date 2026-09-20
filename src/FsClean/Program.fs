@@ -9,9 +9,12 @@ let private usage =
     """fsclean - find dead code, and unneeded project references, in F# projects
 
 USAGE
-    fsclean [options] <project.fsproj>...
+    fsclean [options] <project.fsproj | solution.slnx>...
 
 OPTIONS
+    --exclude <text>  Leave out the projects whose path contains <text> (repeatable). For the project of a
+                      solution that doesn't build. A project that isn't left out and references one
+                      that is still brings it in.
     --whole-program   Treat only entry points as roots, even in libraries. Use when every
                       consumer of a library is among the projects given.
     --explain <text>  Also explain each declaration whose name contains <text>: what uses it,
@@ -36,7 +39,8 @@ type private Args =
       AllReferences: bool
       Fix: bool
       Dry: bool
-      Build: bool }
+      Build: bool
+      Exclude: string list }
 
 type private Command =
     | Help
@@ -56,6 +60,8 @@ let private parseArgs (argv: string list) =
         | "--fix" :: rest -> go { args with Fix = true } rest
         | "--dry" :: rest -> go { args with Fix = true; Dry = true } rest
         | "--build" :: rest -> go { args with Build = true } rest
+        | "--exclude" :: text :: rest -> go { args with Exclude = text :: args.Exclude } rest
+        | [ "--exclude" ] -> Invalid "--exclude needs a value"
         | flag :: _ when flag.StartsWith "-" -> Invalid $"unknown option {flag}"
         | project :: rest -> go { args with Projects = project :: args.Projects } rest
 
@@ -65,7 +71,8 @@ let private parseArgs (argv: string list) =
           AllReferences = false
           Fix = false
           Dry = false
-          Build = false }
+          Build = false
+          Exclude = [] }
         argv
 
 let private locate (decl: Decl) =
@@ -141,7 +148,7 @@ let private run (args: Args) =
         if not (File.Exists path) then
             failwithf "no such project: %s" path
 
-    let projects = ProjectLoader.load projectPaths
+    let projects = ProjectLoader.loadExcluding args.Exclude projectPaths
     let names =
         projects |> List.map (fun project -> References.name project.File) |> List.distinct |> List.sort
 

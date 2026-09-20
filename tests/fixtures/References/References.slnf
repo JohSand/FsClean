@@ -1,0 +1,8 @@
+{
+  "solution": {
+    "path": "References.slnx",
+    "projects": [
+      "RefApp\\RefApp.fsproj"
+    ]
+  }
+}

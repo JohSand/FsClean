@@ -46,6 +46,16 @@ let private analyzeProjects (fixtureProjects: string list) wholeProgram =
          | Ok report -> report
          | Error errors -> failwithf "%A don't type-check:\n%s" fixtureProjects (String.concat "\n" errors))
 
+/// The projects loaded for a solution (or anything else) below tests/fixtures, by name.
+let private loadedFrom (exclude: string list) (path: string) =
+    let full = Path.Combine(repoRoot, "tests", "fixtures", path)
+    restore full
+
+    ProjectLoader.loadExcluding exclude [ full ]
+    |> List.map (fun project -> References.name project.File)
+    |> List.distinct
+    |> List.sort
+
 let private analyze fixture wholeProgram =
     analyzeProjects [ $"{fixture}/{fixture}.fsproj" ] wholeProgram
 
@@ -394,6 +404,33 @@ let tests =
 
               Expect.equal (names result.Removed) (names report.Dead) "everything reported dead goes"
               Expect.isTrue (progress |> Seq.exists (fun line -> line.Trim() = "builds")) $"the build ran and passed: %A{Seq.toList progress}"
+          }
+
+          test "a solution stands for the F# projects it lists" {
+              let all = [ "RefApp"; "RefApp2"; "RefCore"; "RefMiddle"; "RefUtil" ]
+              Expect.equal (loadedFrom [] "References/References.slnx") all ".slnx, folders and other entries ignored"
+              Expect.equal (loadedFrom [] "References/LegacyReferences.sln") all "a classic .sln"
+          }
+
+          test "a solution filter lists a subset, and what it references comes along" {
+              // RefApp references three of the others; RefApp2 is left out.
+              Expect.equal
+                  (loadedFrom [] "References/References.slnf")
+                  [ "RefApp"; "RefCore"; "RefMiddle"; "RefUtil" ]
+                  "the filter's project and its references"
+          }
+
+          test "--exclude leaves out the projects a path matches" {
+              Expect.equal
+                  (loadedFrom [ "RefApp2" ] "References/References.slnx")
+                  [ "RefApp"; "RefCore"; "RefMiddle"; "RefUtil" ]
+                  "RefApp2 is excluded"
+          }
+
+          test "analyzing a solution finds what analyzing its projects does" {
+              let solution = (analyzeProjects [ "References/References.slnx" ] false).Value
+              Expect.equal (referenceLines solution) (referenceLines referencesDefault.Value) "same reference findings"
+              Expect.equal (names solution.Dead) (names referencesDefault.Value.Dead) "same dead code"
           }
 
           test "a preview judges removals with the compiler too, without writing anything" {

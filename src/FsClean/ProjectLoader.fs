@@ -4,9 +4,12 @@ module FsClean.ProjectLoader
 open System
 open System.Collections.Generic
 open System.IO
+open System.Text.Json
 open System.Text.RegularExpressions
+open System.Threading
 open FSharp.Compiler.CodeAnalysis
 open Ionide.ProjInfo
+open Microsoft.VisualStudio.SolutionPersistence.Serializer
 
 type Project =
     {
@@ -57,10 +60,58 @@ let private declaredReferences (projectFile: string) (targetFramework: string) :
         collection.UnloadAllProjects()
         collection.Dispose()
 
+let private isSolution (path: string) =
+    [ ".sln"; ".slnx"; ".slnf" ]
+    |> List.exists (fun extension -> path.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
+
+/// The F# projects a solution (`.sln`, `.slnx`) or solution filter (`.slnf`) lists, as full paths.
+/// Projects in other languages are left out: there's nothing to analyze in them.
+let private projectsOf (solution: string) : string list =
+    let solution = Path.GetFullPath solution
+
+    // Project paths are written relative to the solution, with either kind of slash.
+    let directory, listed =
+        if solution.EndsWith(".slnf", StringComparison.OrdinalIgnoreCase) then
+            use document = JsonDocument.Parse(File.ReadAllText solution)
+            let filter = document.RootElement.GetProperty "solution"
+            let path = filter.GetProperty("path").GetString().Replace('\\', '/')
+
+            Path.GetDirectoryName(Path.GetFullPath(path, Path.GetDirectoryName solution)),
+            [ for project in filter.GetProperty("projects").EnumerateArray() -> project.GetString() ]
+        else
+            let serializer = SolutionSerializers.GetSerializerByMoniker solution
+
+            if isNull serializer then
+                failwithf "%s isn't a solution file this can read." solution
+
+            let model =
+                serializer.OpenAsync(solution, CancellationToken.None)
+                |> Async.AwaitTask
+                |> Async.RunSynchronously
+
+            Path.GetDirectoryName solution, [ for project in model.SolutionProjects -> project.FilePath ]
+
+    listed
+    |> List.map (fun project -> Path.GetFullPath(project.Replace('\\', '/'), directory))
+    |> List.filter (fun project -> project.EndsWith(".fsproj", StringComparison.OrdinalIgnoreCase))
+
 /// The projects must already be restored: MSBuild is asked for the design-time compiler arguments,
 /// which needs `obj/project.assets.json`.
-let load (projectPaths: string list) : Project list =
-    let paths = projectPaths |> List.map Path.GetFullPath
+///
+/// A solution stands for the F# projects it lists. Those whose path contains one of the `exclude`
+/// texts are left out, which is for the project in a solution that doesn't build; they are still
+/// loaded if a project that isn't excluded references them.
+let loadExcluding (exclude: string list) (projectPaths: string list) : Project list =
+    let paths =
+        projectPaths
+        |> List.collect (fun path -> if isSolution path then projectsOf path else [ Path.GetFullPath path ])
+        |> List.distinct
+        |> List.filter (fun path ->
+            not (exclude |> List.exists (fun text -> path.Contains(text, StringComparison.OrdinalIgnoreCase))))
+
+    if paths.IsEmpty then
+        failwithf "There are no F# projects to analyze in: %s" (String.concat ", " projectPaths)
+
     let loader = WorkspaceLoader.Create(toolsPathFor (Path.GetDirectoryName paths.Head))
 
     // Also returns the projects the requested ones reference, which is what lets uses in a
@@ -87,3 +138,6 @@ let load (projectPaths: string list) : Project list =
         { Options = FCS.mapToFSharpProjectOptions project projects
           File = Path.GetFullPath project.ProjectFileName
           References = declaredReferences project.ProjectFileName project.TargetFramework })
+
+/// `loadExcluding` with nothing excluded.
+let load (projectPaths: string list) : Project list = loadExcluding [] projectPaths

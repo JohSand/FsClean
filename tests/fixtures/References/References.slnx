@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/notes/">
+    <File Path="Notes.txt" />
+  </Folder>
+  <Project Path="RefCore/RefCore.fsproj" />
+  <Project Path="RefUtil/RefUtil.fsproj" />
+  <Project Path="RefMiddle/RefMiddle.fsproj" />
+  <Project Path="RefApp/RefApp.fsproj" />
+  <Project Path="RefApp2/RefApp2.fsproj" />
+</Solution>
