@@ -1,3 +1,10 @@
 bin/
 obj/
 artifacts/
+
+# Editor and IDE files
+.idea/
+.vs/
+.vscode/
+*.user
+*.suo
