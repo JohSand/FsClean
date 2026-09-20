@@ -63,9 +63,14 @@ set aside. A namespace is never left empty, since the compiler treats one as not
 
 ### Big solutions
 
-It holds a type-checked copy of the whole solution, so expect several gigabytes for a few hundred thousand
-lines (about 6 GB for 400k). A run prints what it's doing on stderr, because a check of a large solution takes
-minutes.
+It holds a type-checked copy of the whole solution, so it needs gigabytes, and how many depends on more than the
+line count. A `--dry` run took about 2 minutes and peaked at 4.6 GB on a 66k-line solution of 18 projects, and
+about 2.5 minutes and 6.0 GB on one of about 400k lines (15 of its 17 projects analyzed). Plan for 6 GB or more on a large solution, and close
+other memory-hungry programs first: on a machine without the headroom the kernel kills the run.
+
+It uses the server garbage collector, which about halves the time at the cost of some extra memory. `--timings`
+reports how long each phase took on stderr, and a run prints what it's doing there anyway, because a check of a
+large solution takes minutes.
 
 ### Newer F# than the tool
 
