@@ -10,6 +10,7 @@ let private usage =
 
 USAGE
     fsclean [options] <project.fsproj | solution.slnx>...
+    fsclean opens [options] <project.fsproj | solution.slnx>...
 
 OPTIONS
     --exclude <text>  Leave out the projects whose path contains <text> (repeatable). For the project of a
@@ -32,6 +33,13 @@ OPTIONS
                       no file. Implies --fix.
     -h, --help        Show this help.
 
+COMMANDS
+    opens             List the `open` declarations the compiler service considers unused. With --fix,
+                      remove them: each removal is kept only if the projects still type-check and every
+                      name in the edited files still resolves to the same symbol. --dry previews it,
+                      --build also builds with dotnet build, --exclude and --timings work as above.
+                      Files with #if are left alone. Commit first.
+
 The projects must be restored first (dotnet restore)."""
 
 type private Args =
@@ -44,9 +52,18 @@ type private Args =
       Timings: bool
       Exclude: string list }
 
+type private OpensArgs =
+    { Projects: string list
+      Fix: bool
+      Dry: bool
+      Build: bool
+      Timings: bool
+      Exclude: string list }
+
 type private Command =
     | Help
     | Run of Args
+    | Opens of OpensArgs
     | Invalid of string
 
 let private parseArgs (argv: string list) =
@@ -78,6 +95,23 @@ let private parseArgs (argv: string list) =
           Timings = false
           Exclude = [] }
         argv
+
+let private parseOpensArgs (argv: string list) =
+    let rec go (args: OpensArgs) rest =
+        match rest with
+        | [] when List.isEmpty args.Projects -> Invalid "no project given"
+        | [] -> Opens { args with Projects = List.rev args.Projects }
+        | ("-h" | "--help") :: _ -> Help
+        | "--fix" :: rest -> go { args with Fix = true } rest
+        | "--dry" :: rest -> go { args with Fix = true; Dry = true } rest
+        | "--build" :: rest -> go { args with Build = true } rest
+        | "--timings" :: rest -> go { args with Timings = true } rest
+        | "--exclude" :: text :: rest -> go { args with Exclude = text :: args.Exclude } rest
+        | [ "--exclude" ] -> Invalid "--exclude needs a value"
+        | flag :: _ when flag.StartsWith "-" -> Invalid $"unknown option {flag} for opens"
+        | project :: rest -> go { args with Projects = project :: args.Projects } rest
+
+    go { Projects = []; Fix = false; Dry = false; Build = false; Timings = false; Exclude = [] } argv
 
 let private locate (decl: Decl) =
     let file = Path.GetRelativePath(Environment.CurrentDirectory, decl.Range.FileName)
@@ -152,6 +186,7 @@ let private run (args: Args) =
         if not (File.Exists path) then
             failwithf "no such project: %s" path
 
+    use watch = Memory.watch (eprintfn "%s")
     let clock = System.Diagnostics.Stopwatch.StartNew()
     let projects = ProjectLoader.loadExcluding args.Exclude projectPaths
     let log = if args.Timings then eprintfn "%s" else ignore
@@ -162,7 +197,7 @@ let private run (args: Args) =
     eprintfn "Analyzing %d projects: %s" names.Length (String.concat ", " names)
     let checker = Analysis.createChecker projects
 
-    match Analysis.analyzeWith log checker args.Options projects |> Async.RunSynchronously with
+    match Analysis.analyzeWith log checker args.Options projects |> watch.Run with
     | Error errors ->
         let shown = 20
         eprintfn "The projects don't type-check, so the analysis would be unreliable (%d errors):" errors.Length
@@ -189,7 +224,7 @@ let private run (args: Args) =
             let mode = if args.Dry then Fix.Preview else Fix.Apply
             eprintfn "Checking that the removals still type-check..."
             let run = if args.Build then Fix.runBuilt else Fix.runWith
-            let result = run checker (eprintfn "%s") mode projects report.Dead |> Async.RunSynchronously
+            let result = run checker (eprintfn "%s") mode projects report.Dead |> watch.Run
             printSection (if args.Dry then "Would remove" else "Removed") result.Removed
             printKept result.Kept
 
@@ -215,9 +250,93 @@ let private run (args: Args) =
 
         0
 
+let private runOpens (args: OpensArgs) =
+    for path in args.Projects do
+        if not (File.Exists path) then
+            failwithf "no such project: %s" path
+
+    use watch = Memory.watch (eprintfn "%s")
+    let clock = System.Diagnostics.Stopwatch.StartNew()
+    let projects = ProjectLoader.loadExcluding args.Exclude args.Projects
+    let log = if args.Timings then eprintfn "%s" else ignore
+    log $"  loaded {projects.Length} projects: {clock.Elapsed.TotalSeconds:F1}s"
+    let checker = Analysis.createChecker projects
+
+    match Opens.findWith log checker projects |> watch.Run with
+    | Error errors ->
+        eprintfn "The projects don't type-check, so the analysis would be unreliable (%d errors):" errors.Length
+
+        for error in List.truncate 20 errors do
+            eprintfn "  %s" error
+
+        1
+    | Ok candidates ->
+        log $"  found {candidates.Length} candidates: {clock.Elapsed.TotalSeconds:F1}s"
+
+        let show (candidate: Opens.Candidate) =
+            let file = Path.GetRelativePath(Environment.CurrentDirectory, candidate.File)
+            $"{file}:{candidate.Range.StartLine}  {candidate.Line}"
+
+        if not args.Fix then
+            for candidate in candidates do
+                printfn "%s" (show candidate)
+
+            printfn ""
+            printfn "%d unused opens." candidates.Length
+            0
+        else
+            let mode = if args.Dry then Fix.Preview else Fix.Apply
+            eprintfn "Checking that removing them still type-checks..."
+
+            let result =
+                Opens.fixWith log checker args.Build (eprintfn "%s") mode projects candidates
+                |> watch.Run
+
+            if not result.Removed.IsEmpty then
+                printfn "%s (%d)" (if args.Dry then "Would remove" else "Removed") result.Removed.Length
+
+                for candidate in result.Removed do
+                    printfn "  %s" (show candidate)
+
+                printfn ""
+
+            if not result.Kept.IsEmpty then
+                printfn "Left in place (%d)" result.Kept.Length
+
+                for candidate, why in result.Kept do
+                    printfn "  %s" (show candidate)
+                    printfn "      %s" why
+
+                printfn ""
+
+            if args.Dry then
+                for file, before, after in result.Edited do
+                    let path = Path.GetRelativePath(Environment.CurrentDirectory, file)
+
+                    for line in Diff.unified path before after do
+                        printfn "%s" line
+
+                printfn ""
+                printfn "Would remove %d opens from %d files. Nothing was changed." result.Removed.Length result.Files.Length
+            else
+                printfn "Removed %d opens from %d files." result.Removed.Length result.Files.Length
+
+            0
+
+/// The run was stopped for want of memory; any file a `--fix` had touched is back as it was.
+let private outOfMemory () =
+    eprintfn "fsclean: stopped because the machine was about to run out of memory. Nothing was changed."
+    eprintfn "Close other programs, or analyze fewer projects at a time (--exclude), and try again."
+    3
+
 [<EntryPoint>]
 let main argv =
-    match parseArgs (List.ofArray argv) with
+    let command =
+        match List.ofArray argv with
+        | "opens" :: rest -> parseOpensArgs rest
+        | args -> parseArgs args
+
+    match command with
     | Help ->
         printfn "%s" usage
         0
@@ -227,6 +346,16 @@ let main argv =
     | Run args ->
         try
             run args
-        with Failure message ->
+        with
+        | Failure message ->
             eprintfn "fsclean: %s" message
             1
+        | Memory.Exhausted _ -> outOfMemory ()
+    | Opens args ->
+        try
+            runOpens args
+        with
+        | Failure message ->
+            eprintfn "fsclean: %s" message
+            1
+        | Memory.Exhausted _ -> outOfMemory ()

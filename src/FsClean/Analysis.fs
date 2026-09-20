@@ -311,11 +311,11 @@ let private isExe (project: FSharpProjectOptions) =
     project.OtherOptions
     |> Array.exists (fun option -> option = "--target:exe" || option = "--target:winexe")
 
-let private sourceFiles (project: FSharpProjectOptions) =
+let sourceFiles (project: FSharpProjectOptions) =
     project.SourceFiles
     |> Array.filter (fun file -> file.EndsWith(".fs", StringComparison.OrdinalIgnoreCase))
 
-let private errorsIn (results: FSharpCheckProjectResults) =
+let errorsIn (results: FSharpCheckProjectResults) =
     results.Diagnostics
     |> Array.filter (fun d -> d.Severity = FSharpDiagnosticSeverity.Error)
     |> Array.map (fun d -> $"{d.FileName}({d.StartLine},{d.StartColumn}): {d.Message}")
@@ -324,8 +324,14 @@ let private errorsIn (results: FSharpCheckProjectResults) =
 /// The compiler keeps three projects in its cache unless told otherwise. A solution's projects
 /// reference each other and are checked one after another, so with fewer slots than projects it
 /// would check the same ones over and over.
+/// FSCLEAN_PROJECT_CACHE sets the number of slots, to trade time for memory on a big solution.
 let createChecker (projects: Project list) =
-    FSharpChecker.Create(projectCacheSize = max 3 projects.Length)
+    let slots =
+        match Int32.TryParse(Environment.GetEnvironmentVariable "FSCLEAN_PROJECT_CACHE") with
+        | true, slots when slots > 0 -> slots
+        | _ -> max 3 projects.Length
+
+    FSharpChecker.Create(projectCacheSize = slots)
 
 /// What the compiler reports for the projects as they are on disk right now.
 let typeErrors (checker: FSharpChecker) (projects: Project list) : Async<string list> =

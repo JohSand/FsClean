@@ -126,6 +126,34 @@ let private fixFixture fixture =
 let private deadFixed = fixFixture "DeadCodeSample"
 let private layoutFixed = fixFixture "RemovalSample"
 
+type private OpensFixed =
+    { Directory: string
+      Projects: ProjectLoader.Project list
+      Found: Opens.Candidate list
+      Outcome: Opens.Outcome }
+
+/// Removes the unused opens from a private copy of a fixture.
+let private opensFixed mode =
+    let directory, project = copyFixture "OpensSample"
+    let projects = ProjectLoader.load [ project ]
+    let checker = Analysis.createChecker projects
+
+    match Opens.find checker projects |> Async.RunSynchronously with
+    | Error errors -> failwithf "doesn't type-check:\n%s" (String.concat "\n" errors)
+    | Ok found ->
+        { Directory = directory
+          Projects = projects
+          Found = found
+          Outcome = Opens.fix checker false ignore mode projects found |> Async.RunSynchronously }
+
+let private opensApplied = lazy (opensFixed Fix.Apply)
+let private opensPreviewed = lazy (opensFixed Fix.Preview)
+
+let private openLines (applied: OpensFixed) =
+    applied.Found
+    |> List.map (fun c -> $"{Path.GetFileName c.File}:{c.Range.StartLine} {c.Line}")
+
+
 let private names (decls: Analysis.Decl list) =
     decls |> List.map (fun decl -> decl.Name) |> List.sort
 
@@ -451,6 +479,125 @@ let tests =
               let _, before, after = scenario.Result.Edited |> List.find (fun (file, _, _) -> file.EndsWith "Library.fs")
               Expect.isTrue (before.Contains "unusedFunction" && not (after.Contains "unusedFunction")) "the edit is reported"
               Expect.isTrue (after.Contains "let usedFunction") "without the wrong finding"
+          }
+
+          test "finds the opens nothing in a file resolves through" {
+              Expect.equal
+                  (openLines opensApplied.Value)
+                  [ "Conditional.fs:3 open System.IO"
+                    "Usage.fs:4 open System.IO"
+                    "Usage.fs:5 open System.Collections.Generic"
+                    "Usage.fs:7 open Sample.BuilderExtensions" ]
+                  "the used opens aren't reported; the extension that the compiler service can't see is"
+          }
+
+          test "removes an unused open, and leaves the file as if it had never been there" {
+              let applied = opensApplied.Value
+              let usage = File.ReadAllText(Path.Combine(applied.Directory, "Usage.fs"))
+
+              Expect.equal
+                  (usage.Replace("\r\n", "\n"))
+                  (File.ReadAllText(Path.Combine(repoRoot, "tests", "fixtures", "OpensSample", "Usage.fs"))
+                      .Replace("\r\n", "\n")
+                      .Replace("open System.IO\n", "")
+                      .Replace("open System.Collections.Generic\n", ""))
+                  "only those two lines are gone"
+          }
+
+          test "keeps an open the compiler needs, with the compiler's reason" {
+              let applied = opensApplied.Value
+
+              let kept =
+                  applied.Outcome.Kept
+                  |> List.find (fun (c, _) -> c.Line = "open Sample.BuilderExtensions")
+
+              Expect.stringContains (snd kept) "'For' method" "why it stays"
+
+              Expect.isTrue
+                  ((File.ReadAllText(Path.Combine(applied.Directory, "Usage.fs"))).Contains "open Sample.BuilderExtensions")
+                  "it's still in the file"
+
+              Expect.isEmpty
+                  (Analysis.typeErrors (FSharpChecker.Create()) applied.Projects |> Async.RunSynchronously)
+                  "the result type-checks"
+          }
+
+          test "leaves a file with conditional compilation alone" {
+              let applied = opensApplied.Value
+
+              Expect.isTrue
+                  (applied.Outcome.Kept
+                   |> List.exists (fun (c, why) -> c.File.EndsWith "Conditional.fs" && why.Contains "conditional compilation"))
+                  "reported, with the reason"
+
+              Expect.isTrue
+                  ((File.ReadAllText(Path.Combine(applied.Directory, "Conditional.fs"))).Contains "open System.IO")
+                  "and its open is still there"
+          }
+
+          test "a preview of removing opens changes no file, and reports the edit" {
+              let applied = opensPreviewed.Value
+
+              Expect.equal
+                  (applied.Outcome.Removed |> List.map (fun c -> c.Line))
+                  [ "open System.IO"; "open System.Collections.Generic" ]
+                  "the same removals as when applied"
+
+              for file in Directory.EnumerateFiles(applied.Directory, "*.fs") do
+                  let original = File.ReadAllText(Path.Combine(repoRoot, "tests", "fixtures", "OpensSample", Path.GetFileName file))
+                  Expect.equal (File.ReadAllText file) original $"{Path.GetFileName file} is untouched"
+
+              Expect.equal (applied.Outcome.Edited |> List.map (fun (file, _, _) -> Path.GetFileName file)) [ "Usage.fs" ] "one file edited in memory"
+          }
+
+          test "a fix stopped part-way, as when memory runs out, puts every file back" {
+              let directory, project = copyFixture "DeadCodeSample"
+              let projects = ProjectLoader.load [ project ]
+              let dead = (analyzeLoaded projects).Dead
+              let read () = [ for file in Directory.EnumerateFiles(directory, "*.fs") -> file, File.ReadAllText file ]
+              let original = read ()
+              use stop = new System.Threading.CancellationTokenSource()
+              let mutable editedWhenStopped = false
+
+              // The first check has run once a result is reported; the files hold the removals being tried.
+              let progress (message: string) =
+                  if message.StartsWith "  " && not stop.IsCancellationRequested then
+                      editedWhenStopped <- read () <> original
+                      stop.Cancel()
+
+              Expect.throws
+                  (fun () -> Fix.runWith (FSharpChecker.Create()) progress Fix.Apply projects dead |> fun work -> Async.RunSynchronously(work, cancellationToken = stop.Token) |> ignore)
+                  "the run is cancelled"
+
+              Expect.isTrue editedWhenStopped "there was something to put back"
+              Expect.equal (read ()) original "every file is as it was"
+          }
+
+          test "removing opens, stopped part-way, puts every file back" {
+              let directory, project = copyFixture "OpensSample"
+              let projects = ProjectLoader.load [ project ]
+              let checker = Analysis.createChecker projects
+              let read () = [ for file in Directory.EnumerateFiles(directory, "*.fs") -> file, File.ReadAllText file ]
+              let original = read ()
+              use stop = new System.Threading.CancellationTokenSource()
+              let mutable editedWhenStopped = false
+
+              let found =
+                  match Opens.find checker projects |> Async.RunSynchronously with
+                  | Ok found -> found
+                  | Error errors -> failwithf "doesn't type-check:\n%s" (String.concat "\n" errors)
+
+              let progress (message: string) =
+                  if message.StartsWith "  " && not stop.IsCancellationRequested then
+                      editedWhenStopped <- read () <> original
+                      stop.Cancel()
+
+              Expect.throws
+                  (fun () -> Opens.fix checker false progress Fix.Apply projects found |> fun work -> Async.RunSynchronously(work, cancellationToken = stop.Token) |> ignore)
+                  "the run is cancelled"
+
+              Expect.isTrue editedWhenStopped "there was something to put back"
+              Expect.equal (read ()) original "every file is as it was"
           }
 
           test "a diff shows the deleted lines with their context" {

@@ -42,19 +42,19 @@ type Result =
 
 let private utf8Bom = [| 0xEFuy; 0xBBuy; 0xBFuy |]
 
-let private hasBom (bytes: byte[]) =
+let hasBom (bytes: byte[]) =
     bytes.Length >= 3 && bytes[0] = utf8Bom[0] && bytes[1] = utf8Bom[1] && bytes[2] = utf8Bom[2]
 
-let private isUtf16 (bytes: byte[]) =
+let isUtf16 (bytes: byte[]) =
     bytes.Length >= 2
     && ((bytes[0] = 0xFFuy && bytes[1] = 0xFEuy) || (bytes[0] = 0xFEuy && bytes[1] = 0xFFuy))
 
-let private decode (bytes: byte[]) =
+let decode (bytes: byte[]) =
     let start = if hasBom bytes then 3 else 0
     Encoding.UTF8.GetString(bytes, start, bytes.Length - start)
 
 /// Keeps the byte order mark the file came with.
-let private encode (original: byte[]) (text: string) =
+let encode (original: byte[]) (text: string) =
     let body = UTF8Encoding(false).GetBytes text
 
     if hasBom original then
@@ -65,7 +65,7 @@ let private encode (original: byte[]) (text: string) =
 /// Serves some files' contents from memory, so the compiler can be asked about edits that were
 /// never written. `stamps` say when each was last "written": a compiler kept between checks re-checks
 /// only what a changed stamp tells it about.
-type private Overlay(files: IReadOnlyDictionary<string, byte[]>, stamps: IReadOnlyDictionary<string, DateTime>) =
+type Overlay(files: IReadOnlyDictionary<string, byte[]>, stamps: IReadOnlyDictionary<string, DateTime>) =
     inherit DefaultFileSystem()
 
     override _.GetLastWriteTimeShim(fileName) =
@@ -79,7 +79,7 @@ type private Overlay(files: IReadOnlyDictionary<string, byte[]>, stamps: IReadOn
         | _ -> base.OpenFileForReadShim(filePath, ?useMemoryMappedFile = useMemoryMappedFile, ?shouldShadowCopy = shouldShadowCopy)
 
 /// The compiler's file system is one setting for the whole process, so previews take turns.
-let private previewLock = obj ()
+let previewLock = obj ()
 
 let private quoted = Regex("'([^']+)'", RegexOptions.Compiled)
 
@@ -92,7 +92,7 @@ let private buildError = Regex(@"^\s*(.+?)\((\d+),(\d+)\): error (\S+): (.*?)(?:
 
 /// What `dotnet build` reports for these projects as they are on disk, as `file(line,col): message`
 /// with absolute paths.
-let private buildErrors (projectFiles: string list) : Async<string list> =
+let buildErrors (projectFiles: string list) : Async<string list> =
     async {
         let errors = ResizeArray<string>()
 
@@ -259,6 +259,9 @@ let private runCore
                                 return! solve accepted right rejected
             }
 
+        // Cancelling isn't an exception, so `with` wouldn't see it; `finally` does.
+        let completed = ref false
+
         try
             let units =
                 editable
@@ -319,6 +322,8 @@ let private runCore
             // Leave the files as the accepted set alone makes them, whatever was tried last.
             let outcome = apply accepted
 
+            completed.Value <- true
+
             return
                 { Removed = outcome.Removed
                   Kept =
@@ -333,11 +338,10 @@ let private runCore
                         // The byte order mark is part of the file's first line.
                         let mark = if hasBom originals[file] then "\uFEFF" else ""
                         file, mark + read file, mark + text) }
-        with error ->
-            // Put every file back before letting the failure through.
-            apply [] |> ignore
-            ExceptionDispatchInfo.Capture(error).Throw()
-            return Unchecked.defaultof<Result>
+        finally
+            // Put every file back when the run fails or is stopped.
+            if not completed.Value then
+                apply [] |> ignore
     }
 
 

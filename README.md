@@ -66,7 +66,16 @@ set aside. A namespace is never left empty, since the compiler treats one as not
 It holds a type-checked copy of the whole solution, so it needs gigabytes, and how many depends on more than the
 line count. A `--dry` run took about 2 minutes and peaked at 4.6 GB on a 66k-line solution of 18 projects, and
 about 2.5 minutes and 6.0 GB on one of about 400k lines (15 of its 17 projects analyzed). Plan for 6 GB or more on a large solution, and close
-other memory-hungry programs first: on a machine without the headroom the kernel kills the run.
+other memory-hungry programs first.
+
+`fsclean opens --fix` judges each file on its own, so its cost doesn't grow with the number of rounds: on that
+solution, 822 candidate opens in 364 files took about 3 minutes and peaked at about 5.1 GB (`--dry`), where checking the whole
+solution once per round took over 7 minutes and 9 GB.
+
+A run watches the machine's available memory (and its container's limit, if it has one). When that stays below
+512 MB or 2% of the total, whichever is larger, even after a full collection, it stops, puts back any file
+`--fix` had touched, says so, and exits with 3, instead of waiting for the kernel to kill it part-way
+through an edit. `FSCLEAN_MEMORY_FLOOR_MB` changes that threshold.
 
 It uses the server garbage collector, which about halves the time at the cost of some extra memory. `--timings`
 reports how long each phase took on stderr, and a run prints what it's doing there anyway, because a check of a

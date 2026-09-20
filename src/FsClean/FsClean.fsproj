@@ -39,6 +39,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="Memory.fs" />
     <Compile Include="Ast.fs" />
     <Compile Include="ProjectLoader.fs" />
     <Compile Include="References.fs" />
@@ -46,6 +47,7 @@
     <Compile Include="Removal.fs" />
     <Compile Include="Diff.fs" />
     <Compile Include="Fix.fs" />
+    <Compile Include="Opens.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 
