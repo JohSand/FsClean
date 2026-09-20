@@ -365,13 +365,23 @@ let private parseNodes (checker: FSharpChecker) (projects: Project list) =
         return nodes.Values |> Seq.toList
     }
 
-let analyze
+/// Like `analyze`, telling `log` how long each phase took.
+let analyzeWith
+    (log: string -> unit)
     (checker: FSharpChecker)
     (options: Options)
     (projects: Project list)
     : Async<Result<Report, string list>> =
     async {
+        let clock = Diagnostics.Stopwatch.StartNew()
+        let mutable last = TimeSpan.Zero
+
+        let mark (what: string) =
+            log $"  {what}: {(clock.Elapsed - last).TotalSeconds:F1}s"
+            last <- clock.Elapsed
+
         let! allNodes = parseNodes checker projects
+        mark $"parsed {allNodes.Length} declarations"
 
         let uses = ResizeArray<FSharpSymbolUse>()
         let usesByProject = ResizeArray<string * FSharpSymbolUse[]>()
@@ -384,6 +394,7 @@ let analyze
             let projectUses = results.GetAllUsesOfAllSymbols()
             usesByProject.Add((project.File, projectUses))
             uses.AddRange projectUses
+            mark $"type-checked {References.name project.File} ({projectUses.Length} uses)"
 
         // A remover working from a half-typed program would miss uses and delete live code.
         if errors.Count > 0 then
@@ -413,6 +424,7 @@ let analyze
                 allNodes
                 |> List.filter (fun node -> node.Symbols.Count > 0 || node.Extends.Count > 0)
             let index = NodeIndex nodes
+            mark $"attached symbols to {nodes.Length} declarations"
 
             for node in nodes do
                 node.Parent <- index.Innermost(node.Extent.Range, except = node)
@@ -447,6 +459,8 @@ let analyze
                         match index.Innermost symbolUse.Range with
                         | Some owner -> addEdge owner target
                         | None -> addRoot target "referenced from top-level code"
+
+            mark "linked uses to declarations"
 
             // A `type X with ...` block declares no type of its own, so nothing ever names it. It
             // stays alive with the type it extends; when that type lives elsewhere (a NuGet package,
@@ -542,7 +556,9 @@ let analyze
                 | Some owner -> reachable.Contains owner
                 | None -> true // top-level code, which always runs
 
+            mark "reachability"
             let references = References.find projects (Seq.toList usesByProject) isLive
+            mark "project references"
 
             let usedByLiveCode = HashSet<Node>(HashIdentity.Reference)
 
@@ -676,6 +692,8 @@ let analyze
                     |> List.map explain
                 | None -> []
 
+            mark "the rest of the report"
+
             return
                 Ok
                     { Analyzed = nodes.Length
@@ -684,3 +702,10 @@ let analyze
                       Explanations = explanations
                       References = references }
     }
+
+let analyze
+    (checker: FSharpChecker)
+    (options: Options)
+    (projects: Project list)
+    : Async<Result<Report, string list>> =
+    analyzeWith ignore checker options projects

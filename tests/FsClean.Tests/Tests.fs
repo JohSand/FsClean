@@ -187,7 +187,7 @@ let private wrongFinding mode =
       Projects = projects
       Report = report
       Wrong = wrong
-      Result = Fix.runWith progress.Add mode projects (report.Dead @ [ wrong ]) |> Async.RunSynchronously
+      Result = Fix.runWith (Analysis.createChecker projects) progress.Add mode projects (report.Dead @ [ wrong ]) |> Async.RunSynchronously
       Progress = Seq.toList progress
       Library = library }
 
@@ -400,7 +400,7 @@ let tests =
               let projects = ProjectLoader.load [ project ]
               let report = analyzeLoaded projects
               let progress = ResizeArray<string>()
-              let result = Fix.runBuilt progress.Add Fix.Apply projects report.Dead |> Async.RunSynchronously
+              let result = Fix.runBuilt (Analysis.createChecker projects) progress.Add Fix.Apply projects report.Dead |> Async.RunSynchronously
 
               Expect.equal (names result.Removed) (names report.Dead) "everything reported dead goes"
               Expect.isTrue (progress |> Seq.exists (fun line -> line.Trim() = "builds")) $"the build ran and passed: %A{Seq.toList progress}"

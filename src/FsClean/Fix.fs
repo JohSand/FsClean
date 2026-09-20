@@ -63,9 +63,15 @@ let private encode (original: byte[]) (text: string) =
         body
 
 /// Serves some files' contents from memory, so the compiler can be asked about edits that were
-/// never written.
-type private Overlay(files: IReadOnlyDictionary<string, byte[]>) =
+/// never written. `stamps` say when each was last "written": a compiler kept between checks re-checks
+/// only what a changed stamp tells it about.
+type private Overlay(files: IReadOnlyDictionary<string, byte[]>, stamps: IReadOnlyDictionary<string, DateTime>) =
     inherit DefaultFileSystem()
+
+    override _.GetLastWriteTimeShim(fileName) =
+        match stamps.TryGetValue fileName with
+        | true, stamp -> stamp
+        | _ -> base.GetLastWriteTimeShim fileName
 
     override _.OpenFileForReadShim(filePath, ?useMemoryMappedFile, ?shouldShadowCopy) : Stream =
         match files.TryGetValue filePath with
@@ -131,6 +137,7 @@ let private namesOf (decl: Decl) =
       yield! modules decl.Extent.Container ]
 
 let private runCore
+    (checker: FSharpChecker)
     (realBuild: bool)
     (progress: string -> unit)
     (mode: Mode)
@@ -152,6 +159,10 @@ let private runCore
         // What each file should currently contain; in a preview, what it would.
         let current = Dictionary<string, byte[]>()
         originals |> Map.iter (fun file bytes -> current[file] <- bytes)
+        let stamps = Dictionary<string, DateTime>()
+
+        // One compiler for every check, and the caller's for the first: after an edit it re-checks from
+        // the first file that changed, rather than the whole solution again.
 
         let read file = decode originals[file]
 
@@ -170,6 +181,7 @@ let private runCore
                         File.WriteAllBytes(file, wanted)
 
                     current[file] <- wanted
+                    stamps[file] <- DateTime.UtcNow
 
             outcome
 
@@ -179,16 +191,17 @@ let private runCore
 
                 let! errors =
                     match mode with
-                    | Apply -> typeErrors (createChecker projects) projects
+                    | Apply -> typeErrors checker projects
                     | Preview ->
                         async {
                             return
                                 lock previewLock (fun () ->
                                     let real = FileSystemAutoOpens.FileSystem
-                                    FileSystemAutoOpens.FileSystem <- Overlay(Dictionary<string, byte[]>(current))
+                                    FileSystemAutoOpens.FileSystem <-
+                                        Overlay(Dictionary<string, byte[]>(current), Dictionary<string, DateTime>(stamps))
 
                                     try
-                                        typeErrors (createChecker projects) projects |> Async.RunSynchronously
+                                        typeErrors checker projects |> Async.RunSynchronously
                                     finally
                                         FileSystemAutoOpens.FileSystem <- real)
                         }
@@ -205,13 +218,15 @@ let private runCore
                 else
                     let candidate = accepted @ List.concat units
                     progress $"checking {units.Length} removals ({candidate.Length - accepted.Length} declarations)..."
+                    let clock = Diagnostics.Stopwatch.StartNew()
                     let! errors = check candidate
+                    let took = $"{clock.Elapsed.TotalSeconds:F0}s"
 
                     if List.isEmpty errors then
-                        progress "  type-checks"
+                        progress $"  type-checks ({took})"
                         return candidate, rejected
                     else
-                        progress $"  {errors.Length} errors"
+                        progress $"  {errors.Length} errors ({took})"
 
                         // The removals the errors name, each with the first error that does.
                         let complaints =
@@ -327,13 +342,25 @@ let private runCore
 
 
 /// Like `run`, telling `progress` what it's doing.
-let runWith (progress: string -> unit) (mode: Mode) (projects: Project list) (dead: Decl list) : Async<Result> =
-    runCore false progress mode projects dead
+let runWith
+    (checker: FSharpChecker)
+    (progress: string -> unit)
+    (mode: Mode)
+    (projects: Project list)
+    (dead: Decl list)
+    : Async<Result> =
+    runCore checker false progress mode projects dead
 
 /// Like `runWith`, and once the removals type-check also builds the projects for real with
 /// `dotnet build`, setting aside whatever that rejects. Ignored for a preview, which writes nothing.
-let runBuilt (progress: string -> unit) (mode: Mode) (projects: Project list) (dead: Decl list) : Async<Result> =
-    runCore true progress mode projects dead
+let runBuilt
+    (checker: FSharpChecker)
+    (progress: string -> unit)
+    (mode: Mode)
+    (projects: Project list)
+    (dead: Decl list)
+    : Async<Result> =
+    runCore checker true progress mode projects dead
 
 let run (mode: Mode) (projects: Project list) (dead: Decl list) : Async<Result> =
-    runWith ignore mode projects dead
+    runWith (createChecker projects) ignore mode projects dead

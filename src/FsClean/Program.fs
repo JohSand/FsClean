@@ -27,6 +27,7 @@ OPTIONS
     --build           With --fix, also build the projects with dotnet build once the removals type-check,
                       and refuse whatever it rejects. Slower, and catches what the F# compiler service
                       used for the type-check accepts and the compiler does not.
+    --timings         Report on stderr how long each phase took.
     --dry             Show what --fix would remove, and the diff, with the same checks, but change
                       no file. Implies --fix.
     -h, --help        Show this help.
@@ -40,6 +41,7 @@ type private Args =
       Fix: bool
       Dry: bool
       Build: bool
+      Timings: bool
       Exclude: string list }
 
 type private Command =
@@ -60,6 +62,7 @@ let private parseArgs (argv: string list) =
         | "--fix" :: rest -> go { args with Fix = true } rest
         | "--dry" :: rest -> go { args with Fix = true; Dry = true } rest
         | "--build" :: rest -> go { args with Build = true } rest
+        | "--timings" :: rest -> go { args with Timings = true } rest
         | "--exclude" :: text :: rest -> go { args with Exclude = text :: args.Exclude } rest
         | [ "--exclude" ] -> Invalid "--exclude needs a value"
         | flag :: _ when flag.StartsWith "-" -> Invalid $"unknown option {flag}"
@@ -72,6 +75,7 @@ let private parseArgs (argv: string list) =
           Fix = false
           Dry = false
           Build = false
+          Timings = false
           Exclude = [] }
         argv
 
@@ -148,14 +152,17 @@ let private run (args: Args) =
         if not (File.Exists path) then
             failwithf "no such project: %s" path
 
+    let clock = System.Diagnostics.Stopwatch.StartNew()
     let projects = ProjectLoader.loadExcluding args.Exclude projectPaths
+    let log = if args.Timings then eprintfn "%s" else ignore
+    log $"  loaded {projects.Length} projects: {clock.Elapsed.TotalSeconds:F1}s"
     let names =
         projects |> List.map (fun project -> References.name project.File) |> List.distinct |> List.sort
 
     eprintfn "Analyzing %d projects: %s" names.Length (String.concat ", " names)
     let checker = Analysis.createChecker projects
 
-    match Analysis.analyze checker args.Options projects |> Async.RunSynchronously with
+    match Analysis.analyzeWith log checker args.Options projects |> Async.RunSynchronously with
     | Error errors ->
         let shown = 20
         eprintfn "The projects don't type-check, so the analysis would be unreliable (%d errors):" errors.Length
@@ -182,7 +189,7 @@ let private run (args: Args) =
             let mode = if args.Dry then Fix.Preview else Fix.Apply
             eprintfn "Checking that the removals still type-check..."
             let run = if args.Build then Fix.runBuilt else Fix.runWith
-            let result = run (eprintfn "%s") mode projects report.Dead |> Async.RunSynchronously
+            let result = run checker (eprintfn "%s") mode projects report.Dead |> Async.RunSynchronously
             printSection (if args.Dry then "Would remove" else "Removed") result.Removed
             printKept result.Kept
 
