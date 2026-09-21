@@ -242,6 +242,56 @@ let private isImplicitlyInvoked (required: HashSet<string>) (symbol: FSharpSymbo
                 || required.Contains("set_" + m.LogicalName)))
     | _ -> false
 
+/// What `[<DynamicallyAccessedMembers(...)>]` on a type says is reached by reflection, as the bits of
+/// `DynamicallyAccessedMemberTypes` (`All` is every bit).
+let private dynamicallyAccessed (entity: FSharpEntity) : int option =
+    try
+        entity.Attributes
+        |> Seq.tryPick (fun attribute ->
+            if attribute.AttributeType.TryFullName = Some "System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembersAttribute" then
+                attribute.ConstructorArguments
+                |> Seq.tryPick (fun (_, argument) ->
+                    match argument with
+                    | :? IConvertible as flags -> Some(int (uint32 (Convert.ToInt64 flags)))
+                    | _ -> None)
+            else
+                None)
+    with _ ->
+        None
+
+/// Whether a member is among what `flags` (see `dynamicallyAccessed`) reach.
+let private memberTypesCover (flags: int) (symbol: FSharpSymbol) =
+    let has bit = flags &&& bit <> 0
+
+    try
+        match symbol with
+        | :? FSharpMemberOrFunctionOrValue as m ->
+            let isPublic = m.Accessibility.IsPublic
+
+            if m.IsConstructor then
+                let parameterless = m.CurriedParameterGroups |> Seq.sumBy (fun group -> group.Count) = 0
+                if isPublic then has 2 || (has 1 && parameterless) else has 4
+            elif m.IsEvent then
+                if isPublic then has 2048 else has 4096
+            elif m.IsProperty || m.IsPropertyGetterMethod || m.IsPropertySetterMethod then
+                if isPublic then has 512 else has 1024
+            elif isPublic then
+                has 8
+            else
+                has 16
+        | _ -> false
+    with _ ->
+        false
+
+/// A member of a type marked `DynamicallyAccessedMembers` that the mark says reflection reaches.
+let private reflectedThrough (parent: Node) (symbol: FSharpSymbol) =
+    parent.Symbols
+    |> Seq.tryPick (fun candidate ->
+        match candidate with
+        | :? FSharpEntity as entity -> dynamicallyAccessed entity
+        | _ -> None)
+    |> Option.exists (fun flags -> memberTypesCover flags symbol)
+
 // ---- symbols ---------------------------------------------------------------
 
 /// The symbols a node can be named by: types and exceptions, and anything that lives in a module
@@ -497,7 +547,11 @@ let analyzeWith
                 | Some parent when node.Extent.Kind = Member ->
                     addEdge node parent
 
-                    if not node.Extent.IsPure || node.Symbols |> Seq.exists (isImplicitlyInvoked required) then
+                    if
+                        not node.Extent.IsPure
+                        || node.Symbols |> Seq.exists (isImplicitlyInvoked required)
+                        || node.Symbols |> Seq.exists (reflectedThrough parent)
+                    then
                         addEdge parent node
                 | _ -> ()
 

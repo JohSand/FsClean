@@ -111,6 +111,11 @@ Conventions where a framework calls a method by name are known for ASP.NET middl
 `InvokeAsync`) and FsCheck generators; others (for instance a serializer that finds members by reflection)
 are not, so a compile-time-clean result still deserves a look.
 
+To say that a type is reached by reflection, put `[<DynamicallyAccessedMembers(...)>]` on it. Its members that
+the flags name count as used: public and non-public constructors, methods, properties and events, so `All`
+covers every member. It is the attribute the .NET trimmer and AOT analyzers read, too. Any other attribute
+keeps the declaration it sits on and nothing inside it, so a marker of your own has to go on each member.
+
 
 ## Development
 

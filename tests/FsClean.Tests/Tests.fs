@@ -60,6 +60,7 @@ let private analyze fixture wholeProgram =
     analyzeProjects [ $"{fixture}/{fixture}.fsproj" ] wholeProgram
 
 let private deadSample = analyze "DeadCodeSample" false
+let private reflectionSample = analyze "ReflectionSample" false
 let private libraryDefault = analyze "LibrarySample" false
 let private libraryWholeProgram = analyze "LibrarySample" true
 
@@ -598,6 +599,19 @@ let tests =
 
               Expect.isTrue editedWhenStopped "there was something to put back"
               Expect.equal (read ()) original "every file is as it was"
+          }
+
+          test "DynamicallyAccessedMembers keeps the members of a type that reflection reaches" {
+              // `All` keeps everything; the others only what their flags name; an attribute of any other
+              // kind keeps the type it's on and nothing inside it; and an unmarked type is dead.
+              Expect.equal
+                  (names reflectionSample.Value.Dead)
+                  [ "Sample.Reflected.AnyMethods.UnreachedProperty"
+                    "Sample.Reflected.MarkedOnly.NotCoveredByTheMarker"
+                    "Sample.Reflected.OnlyProperties.UnreachedMethod"
+                    "Sample.Reflected.OnlyProperties.UnreachedPrivateProperty"
+                    "Sample.Reflected.Plain" ]
+                  "dead declarations"
           }
 
           test "a diff shows the deleted lines with their context" {
